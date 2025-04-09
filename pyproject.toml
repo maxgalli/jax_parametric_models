@@ -1,0 +1,21 @@
+[project]
+name = "jax-parametric-models"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "evermore",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "mplhep",
+    "pyarrow",
+    "iminuit",
+    "ipython",
+    "jax",
+    "jaxlib",
+    "tqdm",
+    "optax",
+    "optimistix",
+    "oryx",
+]
