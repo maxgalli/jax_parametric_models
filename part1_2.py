@@ -20,6 +20,8 @@ from oryx.distributions import Poisson
 from utils import plot_as_data
 from utils import save_image
 
+from distributions import EVMExponential, EVMGaussian
+
 hep.style.use("CMS")
 
 #class NLL(eqx.Module):
@@ -178,7 +180,8 @@ def loss_fn(diffable, static, data):
     params = eqx.combine(diffable, static)
     std = params.sigma
     composed_mu = evm.Parameter(mean_function(params.higgs_mass.value, params.d_higgs_mass.value))
-    model = Gauss(composed_mu, std)
+    #model = Gauss(composed_mu, std)
+    model = EVMGaussian(composed_mu, std)
     nll = NLL(model, data)
     return nll()
 
@@ -243,7 +246,8 @@ params_bkg = ParamsBkg(lam)
 @jax.jit
 def loss_fn_bkg(diffable, static, data):
     params = eqx.combine(diffable, static)
-    model = Expo(params.lambd)
+    #model = Expo(params.lambd)
+    model = EVMExponential(params.lambd)
     nll = NLL(model, data)
     return nll()
 
@@ -283,7 +287,7 @@ fig, ax = plt.subplots()
 #ax = plot_as_data(df_data[var_name], nbins=80, ax=ax)
 ax.set_xlabel("$m_{\gamma\gamma}$ [GeV]")
 x = np.linspace(100, 180, 1000)
-model_bkg = Expo(params_bkg.lambd)
+model_bkg = EVMExponential(params_bkg.lambd)
 y = model_bkg(x)
 ax.plot(x, y, label="fit")
 ax.legend()
@@ -296,7 +300,8 @@ xs_ggH_par = evm.Parameter(value=xs_ggH, name="xs_ggH", lower=0., upper=100., fr
 br_hgg_par = evm.Parameter(value=br_hgg, name="br_hgg", lower=0., upper=1., frozen=True)
 eff_par = evm.Parameter(value=eff, name="eff", lower=0., upper=1., frozen=True)
 lumi_par = evm.Parameter(value=lumi, name="lumi", lower=0., upper=1000000., frozen=True)
-r = evm.Parameter(value=1.0, name="r", lower=0., upper=20.)
+#r = evm.Parameter(value=1.0, name="r", lower=0., upper=20.)
+r = evm.Parameter(value=1.1, name="r", lower=0., upper=20., frozen=True)
 def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
     return r * xs_ggH * br_hgg * eff * lumi
 
@@ -329,9 +334,11 @@ def loss_fn_card(diffable, static, data):
     params = eqx.combine(diffable, static)
     #total_rate_par = evm.Parameter(total_rate(params.r.value, params.xs_ggH.value, params.br_hgg.value, params.eff.value, params.lumi.value, params.model_bkg_norm.value), name="total_rate")
     signal_rate = evm.Parameter(model_ggH_Tag0_norm_function(params.r.value, params.xs_ggH.value, params.br_hgg.value, params.eff.value, params.lumi.value), name="signal_rate")
-    model_bkg = Expo(params.lambd)
+    #model_bkg = Expo(params.lambd)
+    model_bkg = EVMExponential(params.lambd)
     composed_mu = evm.Parameter(mean_function(params.higgs_mass.value, params.d_higgs_mass.value))
-    model_ggH = Gauss(composed_mu, params.sigma)
+    #model_ggH = Gauss(composed_mu, params.sigma)
+    model_ggH = EVMGaussian(composed_mu, params.sigma)
     #model = SumPDF([model_bkg, model_ggH])
     nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
     return nll(data)
@@ -339,6 +346,7 @@ def loss_fn_card(diffable, static, data):
 # === Optimizer (Adam) ===
 learning_rate = 0.05
 optimizer = optax.adam(learning_rate)
+#optimizer = optax.sgd(learning_rate=1e-2)
 opt_state = optimizer.init(eqx.filter(params_card, eqx.is_inexact_array))
 
 # === Training Step ===
@@ -351,12 +359,106 @@ def step_card(params, opt_state, data):
     return params, opt_state, loss
 
 # === Training Loop ===
-num_epochs = 20000
+num_epochs = 10000
 for epoch in range(num_epochs):
     params_card, opt_state, loss = step_card(params_card, opt_state, data_sides)
     if epoch % 50 == 0:
         print(f"Epoch {epoch}: Loss = {loss:.4f}, r = {params_card.r.value}")
         print(f"alpha = {params_card.lambd.value}")
+        print(f"Bkg = {params_card.model_bkg_norm.value}")
+
+denominator = loss
 
 # === Final Results ===
 print(f"Final estimate: r = {params_card.r.value}")
+
+# === Scan for r ===
+print("Scanning for r")
+
+# based on https://github.com/pfackeldey/evermore/blob/main/examples/nll_profiling.py
+def fixed_mu_fit(mu):
+    xs_ggH_par = evm.Parameter(value=xs_ggH, name="xs_ggH", lower=0., upper=100., frozen=True)
+    br_hgg_par = evm.Parameter(value=br_hgg, name="br_hgg", lower=0., upper=1., frozen=True)
+    eff_par = evm.Parameter(value=eff, name="eff", lower=0., upper=1., frozen=True)
+    lumi_par = evm.Parameter(value=lumi, name="lumi", lower=0., upper=1000000., frozen=True)
+    r = evm.Parameter(value=mu.astype(float), name="r", lower=0., upper=20., frozen=True)
+    def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
+        return r * xs_ggH * br_hgg * eff * lumi
+
+    #norm_bkg = evm.Parameter(value=params_card.model_bkg_norm.value, name="model_bkg_Tag0_norm", lower=0., upper=float(3 * df_data.shape[0]))
+    lambd = evm.Parameter(value=params_card.lambd.value, name="lambda", lower=0., upper=0.2)
+
+    # redefine sigma and d_higgs_mass with the best value from before such that they are now frozen
+    sigma = evm.Parameter(value=params.sigma.value, name="sigma", lower=1., upper=5., frozen=True)
+    d_higgs_mass = evm.Parameter(value=params.d_higgs_mass.value, name="dMH", lower=-1., upper=1., frozen=True)
+
+    #params_card_inside = ParamsCard(higgs_mass, d_higgs_mass, sigma, lambd, r, xs_ggH_par, br_hgg_par, eff_par, lumi_par, norm_bkg)
+    params_card_inside = ParamsCard(higgs_mass, d_higgs_mass, sigma, lam, r, xs_ggH_par, br_hgg_par, eff_par, lumi_par, norm_bkg)
+
+    @jax.jit
+    def loss_fn_card_inside(diffable, static, data):
+        params = eqx.combine(diffable, static)
+        #total_rate_par = evm.Parameter(total_rate(params.r.value, params.xs_ggH.value, params.br_hgg.value, params.eff.value, params.lumi.value, params.model_bkg_norm.value), name="total_rate")
+        signal_rate = evm.Parameter(model_ggH_Tag0_norm_function(params.r.value, params.xs_ggH.value, params.br_hgg.value, params.eff.value, params.lumi.value), name="signal_rate")
+        #model_bkg = Expo(params.lambd)
+        model_bkg = EVMExponential(params.lambd)
+        composed_mu = evm.Parameter(mean_function(params.higgs_mass.value, params.d_higgs_mass.value))
+        #model_ggH = Gauss(composed_mu, params.sigma)
+        model_ggH = EVMGaussian(composed_mu, params.sigma)
+        #model = SumPDF([model_bkg, model_ggH])
+        nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
+        return nll(data)
+
+    learning_rate = 0.05
+    optimizer = optax.adam(learning_rate)
+    #optimizer = optax.sgd(learning_rate=1e-2)
+    opt_state = optimizer.init(eqx.filter(params_card_inside, eqx.is_inexact_array))
+
+    @jax.jit
+    def step_card_inside(params, opt_state, data):
+        diffable, static = evm.parameter.partition(params)
+        #loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
+        grads = eqx.filter_grad(loss_fn_card_inside)(diffable, static, data)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = eqx.apply_updates(params, updates)
+        return params, opt_state
+
+    # minimize model with 1000 steps
+    print(f"r = {mu}")
+    for _ in range(1000):
+        model, opt_state = step_card_inside(params_card_inside, opt_state, data_sides)
+        #if _ % 50 == 0:
+        #    print(f"alpha = {model.lambd.value}")
+    dynamic_model, static_model = evm.parameter.partition(model)
+    loss = loss_fn_card_inside(dynamic_model, static_model, data_sides)
+    print(f"mu = {mu}, loss = {loss:.4f}, lambd = {dynamic_model.lambd.value.astype(float)}, bkg_norm = {dynamic_model.model_bkg_norm.value.astype(float)}")
+    return loss
+
+mus = np.linspace(1.1, 1.7, 5)
+numerators = []
+for mu in mus:
+    numerators.append(fixed_mu_fit(mu))
+#numerators = jax.vmap(fixed_mu_fit)(mus)
+print(numerators)
+
+# plot
+print("Plotting scan")
+y = 2 * (numerators - denominator)
+# shift such that the minimum is at 0
+#y -= np.min(y)
+print(y)
+x = np.array(mus)
+
+func = interpolate.interp1d(x, y, kind="cubic")
+n_interp = 1000
+x_interp = np.linspace(x[0], x[-1], n_interp)
+y_interp = func(x_interp)
+y_interp = y_interp - np.min(y_interp)
+fig, ax = plt.subplots()
+ax.plot(x_interp, y_interp, label="scan", color="black")
+ax.set_xlabel("r")
+ax.set_ylabel("-2 ln L")
+# horizontal line at 1
+ax.axhline(y=1, color='r', linestyle='--', label="1 sigma")
+ax.set_ylim(0, 10)
+save_image("part2_scan", output_dir)
