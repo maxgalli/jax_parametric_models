@@ -17,6 +17,13 @@ git clone git@github.com:maxgalli/jax_parametric_models.git
 git clone git@github.com:maxgalli/StatsStudies.git
 ```
 
+### Setup with `uv`
+
+```shell
+uv sync
+uv run part1_2.py
+```
+
 ## Links
 
 - [combine parametric fit tutorial](https://cms-analysis.github.io/HiggsAnalysis-CombinedLimit/latest/tutorial2023/parametric_exercise/#session-structure)

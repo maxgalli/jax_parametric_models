@@ -6,10 +6,11 @@ import matplotlib.colors as colors
 
 hep.style.use("CMS")
 
+
 def plot_as_data(data, nbins=100, normalize_to=None, ax=None, **kwargs):
     if ax is None:
         fig, ax = plt.subplots()
-    
+
     if normalize_to is not None:
         # normalize to is the number of events of another dataset
         bins, edges = np.histogram(data, bins=nbins)
@@ -22,6 +23,7 @@ def plot_as_data(data, nbins=100, normalize_to=None, ax=None, **kwargs):
     ax.errorbar(centers, bins, yerr=yerr, fmt="o", color="black", **kwargs)
     # plot with correct error bars
     return ax
+
 
 def save_image(name, outdir):
     for ext in ["png", "pdf"]:

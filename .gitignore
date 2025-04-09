@@ -1,0 +1,6 @@
+.ropeproject
+.ruff_cache
+.venv
+__pycache__
+figures_part1
+uv.lock
