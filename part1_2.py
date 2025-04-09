@@ -121,8 +121,8 @@ def loss_fn(diffable, static, data):
 
 
 # === Optimizer (adam) ===
-learning_rate = 1e-3
-optimizer = optax.adam(learning_rate)
+optimizer_settings = dict(learning_rate=3e-3, b1=0.999)
+optimizer = optax.adam(**optimizer_settings)
 opt_state = optimizer.init(eqx.filter(params, eqx.is_inexact_array))
 
 
@@ -191,7 +191,7 @@ def loss_fn_bkg(diffable, static, data):
 
 
 # === Optimizer (adam) ===
-optimizer = optax.adam(learning_rate)
+optimizer = optax.adam(**optimizer_settings)
 opt_state = optimizer.init(eqx.filter(params_bkg, eqx.is_inexact_array))
 
 
@@ -313,7 +313,7 @@ def loss_fn_card(diffable, static, data):
 
 
 # === Optimizer (adam) ===
-optimizer = optax.adam(learning_rate)
+optimizer = optax.adam(**optimizer_settings)
 opt_state = optimizer.init(eqx.filter(params_card, eqx.is_inexact_array))
 
 
@@ -416,7 +416,7 @@ def fixed_mu_fit(mu, silent=True):
         nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
         return nll(data)
 
-    optimizer = optax.adam(learning_rate)
+    optimizer = optax.adam(**optimizer_settings)
     opt_state = optimizer.init(eqx.filter(params_card_inside, eqx.is_inexact_array))
 
     @jax.jit
