@@ -13,13 +13,10 @@ import optax
 from copy import deepcopy
 from dask.distributed import Client
 
-
 from utils import plot_as_data
 from utils import save_image
-from part1_2 import ExtendedNLL
 
-from distributions import EVMExponential, EVMGaussian, EVMMixture
-
+from distributions import EVMExponential, EVMGaussian, EVMMixture, ExtendedNLL
 
 # double precision
 jax.config.update("jax_enable_x64", True)

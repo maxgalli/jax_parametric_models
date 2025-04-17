@@ -5,6 +5,52 @@ from jax import lax
 from functools import partial
 import oryx
 import evermore as evm
+import equinox as eqx
+
+
+class ExtendedNLL(eqx.Module):
+    """Generalized Extended Likelihood for a mixture of multiple PDFs."""
+
+    pdfs: list
+    nus: list  # List of event yields (expected event counts per PDF)
+    constraints: list
+
+    def __init__(self, pdfs, nus, constraints=None):
+        assert len(pdfs) == len(nus), (
+            "Number of PDFs must match number of event yields."
+        )
+        self.pdfs = pdfs
+        self.nus = nus
+        self.constraints = constraints if constraints is not None else []
+
+    def __call__(self, x):
+        N = x.shape[0]  # Number of observed events
+        nu_total = sum(nu.value for nu in self.nus)  # Total expected events
+
+        # Compute mixture PDF
+        pdf = sum(nu.value / nu_total * pdf(x) for pdf, nu in zip(self.pdfs, self.nus))
+
+        # Extended likelihood calculation
+        poisson_term = -nu_total + N * jnp.log(nu_total)  # Log(Poisson term)
+        log_likelihood = poisson_term + jnp.sum(
+            jnp.log(pdf + 1e-8)
+        )  # Log-likelihood sum
+
+        # add constraints
+        constraint_term = sum(c() for c in self.constraints)
+        log_likelihood += constraint_term
+
+        return jnp.squeeze(-log_likelihood)  # Negative log-likelihood for minimization
+
+
+class GaussianConstraint:
+    def __init__(self, param, mu, sigma):
+        self.param = param
+        self.mu = mu
+        self.sigma = sigma
+
+    def __call__(self):
+        return -0.5 * ((self.param.value - self.mu) / self.sigma) ** 2
 
 
 class EVMExponential(oryx.distributions.Distribution):
