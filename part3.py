@@ -9,13 +9,14 @@ import evermore as evm
 import equinox as eqx
 from typing import NamedTuple, List
 import jax
-from jax import lax
 import optax
+
 
 from utils import plot_as_data
 from utils import save_image
 
 from distributions import EVMExponential, EVMGaussian, ExtendedNLL, GaussianConstraint
+
 
 # double precision
 jax.config.update("jax_enable_x64", True)
@@ -99,7 +100,7 @@ if __name__ == "__main__":
 
 
     # === Training Loop ===
-    num_epochs = 2000
+    num_epochs = 1000
     for epoch in range(num_epochs):
         params, opt_state, loss = step(params, opt_state, data)
         if epoch % 100 == 0:
@@ -182,9 +183,59 @@ if __name__ == "__main__":
     ax.legend()
     save_image("part1_data_sidebands", output_dir)
 
-    ################
-    # starting part 2
-    ################
+    ###
+    # systematics
+    ###
+    output_dir = "figures_part3_zfit"
+    nominal_file = "mc_part3_ggH_Tag0.parquet"
+    file_template = "mc_part3_ggH_Tag0_{}01Sigma.parquet"
+    var_name = "CMS_hgg_mass"
+
+    # get nominal
+    df_nominal = pd.read_parquet(nominal_file)
+
+    # photonID has weights
+    yield_variations = {}
+    #for sys in ["JEC", "photonID"]:
+    for sys in ["photonID"]:
+        for direction in ["Up", "Down"]:
+            fl = file_template.format(sys + direction)
+            df = pd.read_parquet(fl)
+            numerator = df[var_name] * df["weight"]
+            denominator = df_nominal[var_name] * df_nominal["weight"]
+            yld = numerator.sum() / denominator.sum()
+            yld = yld.astype(np.float64)
+            print("Systematic varied yield ({}, {}) = {:.3f}".format(sys, direction, yld))
+            yield_variations[sys + direction] = yld
+
+    #def yield_multiplicative_factor_asymm_function(theta):
+    #    kappa_up = yield_variations["photonIDUp"]
+    #    kappa_down = yield_variations["photonIDDown"]
+    #    # see CAT-23-001-paper-v19.pdf pag 7
+    #    if theta < -0.5:
+    #        return kappa_down ** (-theta)
+    #    elif theta > 0.5:
+    #        return kappa_up**theta
+    #    else:
+    #        return jnp.exp(
+    #            theta
+    #            * (
+    #                4 * jnp.log(kappa_up / kappa_down)
+    #                + jnp.log(kappa_up * kappa_down)
+    #                * (48 * theta**5 - 40 * theta**3 + 15 * theta)
+    #            )
+    #            / 8
+    #        )
+    #yield_multiplicative_factor_asymm_function = jax.jit(
+    #    yield_multiplicative_factor_asymm_function,
+    #    static_argnames="theta",
+    #)
+
+    def yield_multiplicative_factor_symm_function(theta):
+        print("inside yield_multiplicative_factor_symm_function")
+        print(f"theta = {theta}")
+        return yield_variations["photonIDUp"] ** theta
+
     xs_ggH_par = evm.Parameter(
         value=xs_ggH, name="xs_ggH", lower=0.0, upper=100.0, frozen=True
     )
@@ -197,10 +248,10 @@ if __name__ == "__main__":
     )
     r = evm.Parameter(value=1.0, name="r", lower=0.0, upper=20.0)
 
+    theta = evm.Parameter(value=0.0, name="theta", lower=-5.0, upper=5.0)
 
-    def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
-        return r * xs_ggH * br_hgg * eff * lumi
-
+    def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi, theta):
+        return r * xs_ggH * br_hgg * eff * lumi * theta
 
     norm_bkg = evm.Parameter(
         value=float(df_data.shape[0]),
@@ -209,10 +260,8 @@ if __name__ == "__main__":
         upper=float(3 * df_data.shape[0]),
     )
 
-
     def total_rate(r, xs_ggH, br_hgg, eff, lumi, model_bkg_norm):
         return r * xs_ggH * br_hgg * eff * lumi + model_bkg_norm
-
 
     class ParamsCard(NamedTuple):
         higgs_mass: evm.Parameter
@@ -225,7 +274,7 @@ if __name__ == "__main__":
         eff: evm.Parameter
         lumi: evm.Parameter
         model_bkg_norm: evm.Parameter
-
+        theta: evm.Parameter
 
     # redefine sigma and d_higgs_mass with the best value from before such that they are now frozen
     sigma = evm.Parameter(
@@ -245,12 +294,16 @@ if __name__ == "__main__":
         eff_par,
         lumi_par,
         norm_bkg,
+        theta,
     )
 
     # === Loss Function ===
     @jax.jit
     def loss_fn_card(diffable, static, data):
         params = eqx.combine(diffable, static)
+        th = yield_multiplicative_factor_symm_function(params.theta.value)
+        print("inside loss_fn_card")
+        print(f"theta = {params.theta.value}")
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
                 params.r.value,
@@ -258,6 +311,7 @@ if __name__ == "__main__":
                 params.br_hgg.value,
                 params.eff.value,
                 params.lumi.value,
+                th
             ),
             name="signal_rate",
         )
@@ -266,9 +320,14 @@ if __name__ == "__main__":
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
         model_ggH = EVMGaussian(composed_mu, params.sigma)
-        nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
-        return nll(data)
 
+        theta_constraint = GaussianConstraint(
+            params.theta, 0.0, 1.0
+        )
+        constraints = [theta_constraint]
+        
+        nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate], constraints)
+        return nll(data)
 
     # === Optimizer (adam) ===
     optimizer = optax.adam(**optimizer_settings)
@@ -286,148 +345,16 @@ if __name__ == "__main__":
 
 
     # === Training Loop ===
+    num_epochs = 50000
     for epoch in range(num_epochs):
         params_card, opt_state, loss = step_card(params_card, opt_state, data_sides)
         if epoch % 100 == 0:
             print(f"{epoch=}: Loss = {loss:.4f}, r = {params_card.r.value}")
             print(f"alpha = {params_card.lambd.value}")
             print(f"Bkg = {params_card.model_bkg_norm.value}")
+            print(f"theta = {params_card.theta.value}")
 
     denominator = loss
 
     # === Final Results ===
     print(f"Final estimate: r = {params_card.r.value}\n")
-
-    # === Scan for r ===
-    print("Scanning for r")
-
-    # based on https://github.com/pfackeldey/evermore/blob/main/examples/nll_profiling.py
-    def fixed_mu_fit(mu, silent=True):
-        xs_ggH_par = evm.Parameter(
-            value=xs_ggH, name="xs_ggH", lower=0.0, upper=100.0, frozen=True
-        )
-        br_hgg_par = evm.Parameter(
-            value=br_hgg, name="br_hgg", lower=0.0, upper=1.0, frozen=True
-        )
-        eff_par = evm.Parameter(value=eff, name="eff", lower=0.0, upper=1.0, frozen=True)
-        lumi_par = evm.Parameter(
-            value=lumi, name="lumi", lower=0.0, upper=1000000.0, frozen=True
-        )
-        r = evm.Parameter(
-            value=mu.astype(float), name="r", lower=0.0, upper=20.0, frozen=True
-        )
-
-        def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
-            return r * xs_ggH * br_hgg * eff * lumi
-
-        norm_bkg = evm.Parameter(
-            value=params_card.model_bkg_norm.value,
-            name="model_bkg_Tag0_norm",
-            lower=0.0,
-            upper=float(3 * df_data.shape[0]),
-        )
-        lambd = evm.Parameter(
-            value=params_card.lambd.value, name="lambda", lower=0.0, upper=0.2
-        )
-
-        # redefine sigma and d_higgs_mass with the best value from before such that they are now frozen
-        sigma = evm.Parameter(
-            value=params.sigma.value, name="sigma", lower=1.0, upper=5.0, frozen=True
-        )
-        d_higgs_mass = evm.Parameter(
-            value=params.d_higgs_mass.value, name="dMH", lower=-1.0, upper=1.0, frozen=True
-        )
-
-        params_card_inside = ParamsCard(
-            higgs_mass,
-            d_higgs_mass,
-            sigma,
-            lambd,
-            r,
-            xs_ggH_par,
-            br_hgg_par,
-            eff_par,
-            lumi_par,
-            norm_bkg,
-        )
-
-        @jax.jit
-        def loss_fn_card_inside(diffable, static, data):
-            params = eqx.combine(diffable, static)
-            # total_rate_par = evm.Parameter(total_rate(params.r.value, params.xs_ggH.value, params.br_hgg.value, params.eff.value, params.lumi.value, params.model_bkg_norm.value), name="total_rate")
-            signal_rate = evm.Parameter(
-                model_ggH_Tag0_norm_function(
-                    params.r.value,
-                    params.xs_ggH.value,
-                    params.br_hgg.value,
-                    params.eff.value,
-                    params.lumi.value,
-                ),
-                name="signal_rate",
-            )
-            model_bkg = EVMExponential(params.lambd)
-            composed_mu = evm.Parameter(
-                mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
-            )
-            model_ggH = EVMGaussian(composed_mu, params.sigma)
-            nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
-            return nll(data)
-
-        optimizer = optax.adam(**optimizer_settings)
-        opt_state = optimizer.init(eqx.filter(params_card_inside, eqx.is_inexact_array))
-
-        @jax.jit
-        def step_card_inside(params, opt_state, data):
-            diffable, static = evm.parameter.partition(params)
-            # loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
-            grads = eqx.filter_grad(loss_fn_card_inside)(diffable, static, data)
-            updates, opt_state = optimizer.update(grads, opt_state)
-            params = eqx.apply_updates(params, updates)
-            return params, opt_state
-
-        # minimize model with 1000 steps
-        if not silent:
-            print(f"\nr = {mu}")
-
-        for epoch in range(num_epochs):
-            model, opt_state = step_card_inside(params_card_inside, opt_state, data_sides)
-            if epoch % 100 == 0 and not silent:
-                print(f"{epoch=}: alpha = {model.lambd.value}")
-        dynamic_model, static_model = evm.parameter.partition(model)
-        loss = loss_fn_card_inside(dynamic_model, static_model, data_sides)
-        if not silent:
-            print(
-                f"mu = {mu}, loss = {loss:.4f}, lambd = {dynamic_model.lambd.value.astype(float)}, bkg_norm = {dynamic_model.model_bkg_norm.value.astype(float)}"
-            )
-        return 2 * (loss - denominator)
-
-
-    mus = jnp.linspace(0.7, 2.1, 15)
-    two_nlls = []
-    for mu in mus:
-        two_nll = fixed_mu_fit(mu, silent=True)
-        print(f"|> {mu=:.2f} -> {two_nll=:.2f}")
-        two_nlls.append(two_nll)
-
-    # vectorized version
-    # two_nlls = jax.vmap(fixed_mu_fit)(mus)
-
-
-    # plot
-    print("\nPlotting scan")
-    y = jnp.asarray(two_nlls)
-    x = jnp.array(mus)
-
-    func = interpolate.interp1d(x, y, kind="cubic")
-    n_interp = 1000
-    x_interp = np.linspace(x[0], x[-1], n_interp)
-    y_interp = func(x_interp)
-    y_interp = y_interp - np.min(y_interp)
-    fig, ax = plt.subplots()
-    ax.plot(x_interp, y_interp, label="scan", color="black")
-    ax.set_xlabel("r")
-    ax.set_ylabel("-2 ln L")
-    # horizontal line at 1
-    ax.axhline(y=1, color="r", linestyle="--", label="1 sigma")
-    ax.set_ylim(0, 10)
-    save_image("part2_scan", output_dir)
