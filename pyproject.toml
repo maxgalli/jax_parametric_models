@@ -18,4 +18,6 @@ dependencies = [
     "optax",
     "optimistix",
     "oryx",
+    "dask",
+    "distributed",
 ]

@@ -132,7 +132,6 @@ class EVMMixture(oryx.distributions.Distribution):
                 (sample_shape[1],),
                 p=self.weights.reshape(-1),
             )
-            print(component_idx)
             # sample from each component
             component_samples = []
             for idx in range(len(self.components)):
@@ -143,10 +142,21 @@ class EVMMixture(oryx.distributions.Distribution):
             component_samples = jnp.array(component_samples)
             # based on component_idx, make a new array that selects the events from the chosen component
             event_indices = jnp.arange(sample_shape[1])
+            # debug: print total, how many events per component
+            #print("How many 0s and 1s") 
+            #print(jnp.sum(component_idx == 0))
+            #print(jnp.sum(component_idx == 1))
+            #print(len(component_idx))
             sample = component_samples[component_idx, event_indices]
             samples.append(sample)
             return sample
         samples = jax.vmap(make_toy)(keys)
         # reshape such that samples is of shape (number_of_toys, nevents)
         #samples = jnp.array(samples)
+
+        # debug
+        #for k in keys:
+        #    samples.append(make_toy(k))
+        #samples = jnp.array(samples)
+
         return samples

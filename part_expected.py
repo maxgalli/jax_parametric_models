@@ -61,7 +61,7 @@ def main():
     lumi_par = evm.Parameter(
         value=lumi, name="lumi", lower=0.0, upper=1000000.0, frozen=True
     )
-    r = evm.Parameter(value=1.0, name="r", lower=0.0, upper=20.0)
+    r = evm.Parameter(value=0.5, name="r", lower=0.0, upper=20.0)
 
     def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
@@ -76,6 +76,7 @@ def main():
         ),
         name="signal_rate",
     )
+    print(signal_rate.value)
 
     # background
     lam = evm.Parameter(value=0.05, name="lambda", lower=0, upper=0.2, frozen=True)
@@ -90,20 +91,22 @@ def main():
         name="model_bkg_Tag0_norm",
         lower=0.0,
         upper=float(3 * df_data.shape[0]),
-        frozen=True,
+        frozen=False,
     )
+    print(norm_bkg.value)
     # full model
     model = EVMMixture(
         components=[gauss, bkg],
         weights=[signal_rate, norm_bkg],
     )
 
-    nevents = len(df_data)
+    #nevents = len(df_data)
+    nevents = 10181
+    print("number of events:", nevents)
     ntoys = 100
     key = jax.random.PRNGKey(0)
     toy_list = []
-    for i in range(1, 15):
-        print(i)
+    for i in range(1, 10):
         toy = model.sample(
             seed=key,
             #sample_shape=(nevents,),
@@ -179,7 +182,8 @@ def main():
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
         model_ggH = EVMGaussian(composed_mu, params.sigma)
-        nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
+        #nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
+        nll = ExtendedNLL([model_ggH, model_bkg], [signal_rate, params.model_bkg_norm])
         return nll(data)
 
     # === Optimizer (adam) ===
@@ -246,14 +250,13 @@ def main():
         opt_state_list,
     )
     params_after = client.gather(params_after)
-    print(params_after)
     
     dist_r = jnp.array([p.r.value for p in params_after])
     mean_r = jnp.mean(dist_r)
     std_r = jnp.std(dist_r)
     print(f"mean r: {mean_r}, std r: {std_r}")
-    for p in params_after:
-        print(p.r.value)
+    #for p in params_after:
+    #    print(p.r.value)
 
 if __name__ == "__main__":
     main()
