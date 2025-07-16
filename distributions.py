@@ -3,12 +3,10 @@ import jax.numpy as jnp
 from jax import jit
 from jax import lax
 from functools import partial
-import oryx
 import evermore as evm
 import equinox as eqx
 from quadax import romberg, quadgk
 
-from oryx.distributions import Distribution
 import equinox as eqx
 import abc
 from jaxtyping import Array, Float
@@ -54,9 +52,9 @@ class EVMDistribution(eqx.Module):
     def integrate(self, lower=None, upper=None) -> Float[Array, "..."]:
         """Integrate the unnormalized probability density function over the range [lower, upper]."""
         if lower is None:
-            lower = self.var.lower[0]
+            lower = self.var.lower
         if upper is None:
-            upper = self.var.upper[0]
+            upper = self.var.upper
 
         #def _unnormalized_prob_nograd(value):
         #    return lax.stop_gradient(self.unnormalized_prob(value))

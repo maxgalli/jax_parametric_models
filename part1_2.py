@@ -1,22 +1,25 @@
-import pandas as pd
-import numpy as np
+import os
+from typing import NamedTuple
+
+import equinox as eqx
+import evermore as evm
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import mplhep as hep
+import numpy as np
+import pandas as pd
 from scipy import interpolate
-import os
-import jax.numpy as jnp
-import evermore as evm
-import equinox as eqx
-from typing import NamedTuple, List
-import jax
-from jax import lax
-import optax
+import optimistix
 
-from utils import plot_as_data
-from utils import save_image
-
-#from distributions import EVMExponential, EVMGaussian, ExtendedNLL, GaussianConstraint
-from distributions import EVMExponential, EVMGaussian, ExtendedNLL, GaussianConstraint, EVMSumPDF
+from distributions import (
+    EVMExponential,
+    EVMGaussian,
+    EVMSumPDF,
+    ExtendedNLL,
+)
+from utils import plot_as_data, save_image
+from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 
 # double precision
 jax.config.update("jax_enable_x64", True)
@@ -24,32 +27,6 @@ jax.config.update("jax_enable_x64", True)
 # plot styling
 hep.style.use("CMS")
 
-class EarlyStopper:
-    def __init__(self, min_delta=0.02, patience=5):
-        """
-        Parameters:
-        - min_delta (float): Minimum relative improvement in loss (e.g. 0.02 for 2%)
-        - patience (int): Number of consecutive epochs without sufficient improvement
-        """
-        self.min_delta = min_delta
-        self.patience = patience
-        self.best_loss = 10e20
-        self.counter = 0
-        self.early_stop = False
-
-    def __call__(self, current_loss):
-        relative_improvement = abs((self.best_loss - current_loss) / self.best_loss)
-        if relative_improvement > self.min_delta:
-            #print(current_loss)
-            #print(self.best_loss)
-            self.best_loss = current_loss
-            self.counter = 0
-        else:
-            #print(current_loss)
-            #print(self.best_loss)
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
 
 if __name__ == "__main__":
     # Signal modelling
@@ -68,14 +45,24 @@ if __name__ == "__main__":
     data = jax.numpy.array(df["CMS_hgg_mass"].values)
     true_mean = 125.0
 
+    minuit_transform = MinuitTransform()
+
     mass = evm.Parameter(
-        value=true_mean, name="CMS_hgg_mass", lower=100.0, upper=180.0, frozen=False
+        value=true_mean,
+        name="CMS_hgg_mass",
+        lower=100.0,
+        upper=180.0,
+        frozen=False,
     )
     higgs_mass = evm.Parameter(
         value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True
     )
-    d_higgs_mass = evm.Parameter(value=0.0, name="dMH", lower=-1.0, upper=1.0)
-    sigma = evm.Parameter(value=2.0, name="sigma", lower=1.0, upper=5.0)
+    d_higgs_mass = evm.Parameter(
+        value=0.0, name="dMH", lower=-1.0, upper=1.0, transform=minuit_transform
+    )
+    sigma = evm.Parameter(
+        value=2.0, name="sigma", lower=1.0, upper=5.0, transform=minuit_transform
+    )
 
     class Params(NamedTuple):
         higgs_mass: evm.Parameter
@@ -92,13 +79,12 @@ if __name__ == "__main__":
         data: jax.Array
 
         def __call__(self):
-            return -jnp.sum(jnp.log(self.model(self.data) + 1e-8))
+            return -jnp.sum(jnp.log(self.model(self.data) + 1e-10))
 
     # === Loss Function ===
-    @jax.jit
+    @eqx.filter_jit
     def loss_fn(diffable, static, data):
-        # return negative_log_likelihood(model, data)
-        params = eqx.combine(diffable, static)
+        params = wrap(evm.parameter.combine(diffable, static))
         std = params.sigma
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
@@ -107,36 +93,29 @@ if __name__ == "__main__":
         nll = NLL(model, data)
         return nll()
 
-    # === Optimizer (adam) ===
-    optimizer_settings = dict(learning_rate=3e-3, b1=0.999)
-    optimizer = optax.adam(**optimizer_settings)
-    opt_state = optimizer.init(eqx.filter(params, eqx.is_inexact_array))
+    diffable, static = evm.parameter.partition(unwrap(params))
 
-    # === Training Step ===
-    @jax.jit
-    def step(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
-        loss, grads = jax.value_and_grad(loss_fn)(diffable, static, data)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = eqx.apply_updates(params, updates)
-        return params, opt_state, loss
+    def optx_loss_fn(diffable, args):
+        return loss_fn(diffable, *args)
 
-    # === Training Loop ===
-    num_epochs = 500
-    early_stopper = EarlyStopper(min_delta=0.001, patience=5)
-    for epoch in range(num_epochs):
-        params, opt_state, loss = step(params, opt_state, data)
-        if epoch % 100 == 0:
-            print(f"{epoch=}: Loss = {loss:.4f}, Std = {params.sigma.value}")
-            print(f"dMH = {params.d_higgs_mass.value}")
-        early_stopper(loss)
-        if early_stopper.early_stop:
-            print(f"Early stopping at epoch {epoch} with loss {loss:.4f}")
-            break
+    solver = optimistix.BFGS(
+        rtol=1e-5, atol=1e-7, verbose=frozenset({"step_size", "loss"})
+    )
+    fitresult = optimistix.minimise(
+        optx_loss_fn,
+        solver,
+        diffable,
+        has_aux=False,
+        args=(static, data),
+        options={},
+        max_steps=1000,
+        throw=True,
+    )
+    fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
 
     # === Final Results ===
-    print(f"Final estimate: Std = {params.sigma.value}")
-    print(f"Final estimate: dMH = {params.d_higgs_mass.value}")
+    print(f"Final estimate: Std = {fitted_params.sigma.value}")
+    print(f"Final estimate: dMH = {fitted_params.d_higgs_mass.value}")
 
     # Signal normalisation
     print("Getting signal normalisation")
@@ -163,52 +142,46 @@ if __name__ == "__main__":
     df_data = df_data[(df_data[var_name] > 100) & (df_data[var_name] < 180)]
     # data_sides = jax.numpy.array(df_data_sides[var_name].values)
     data_sides = jax.numpy.array(df_data[var_name].values)
-    lam = evm.Parameter(value=0.05, name="lambda", lower=0, upper=0.2)
+    lam = evm.Parameter(
+        value=0.05, name="lambda", lower=0, upper=0.2, transform=minuit_transform
+    )
 
     class ParamsBkg(NamedTuple):
         lambd: evm.Parameter
 
     params_bkg = ParamsBkg(lam)
 
-    @jax.jit
+    @eqx.filter_jit
     def loss_fn_bkg(diffable, static, data):
-        params = eqx.combine(diffable, static)
+        params = wrap(evm.parameter.combine(diffable, static))
         model = EVMExponential(mass, lambd=params.lambd)
         nll = NLL(model, data)
         return nll()
 
-    # === Optimizer (adam) ===
-    optimizer = optax.adam(**optimizer_settings)
-    opt_state = optimizer.init(eqx.filter(params_bkg, eqx.is_inexact_array))
+    diffable, static = evm.parameter.partition(unwrap(params_bkg))
 
-    # === Training Step ===
-    @jax.jit
-    def step_bkg(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
-        loss, grads = jax.value_and_grad(loss_fn_bkg)(diffable, static, data)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = eqx.apply_updates(params, updates)
-        return params, opt_state, loss
+    def optx_loss_fn(diffable, args):
+        return loss_fn_bkg(diffable, *args)
 
-    # === Training Loop ===
-    num_epochs = 500
-    early_stopper_bkg = EarlyStopper(min_delta=0.0001, patience=10)
-    for epoch in range(num_epochs):
-        params_bkg, opt_state, loss = step_bkg(params_bkg, opt_state, data_sides)
-        if epoch % 100 == 0:
-            print(f"{epoch=}: Loss = {loss:.4f}, Lambda = {params_bkg.lambd.value}")
-        early_stopper_bkg(loss)
-        if early_stopper_bkg.early_stop:
-            print(f"Early stopping at epoch {epoch} with loss {loss:.4f}")
-            break
+    fitresult = optimistix.minimise(
+        optx_loss_fn,
+        solver,
+        diffable,
+        has_aux=False,
+        args=(static, data_sides),
+        options={},
+        max_steps=1000,
+        throw=True,
+    )
+    fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
 
     # === Final Results ===
-    print(f"Final estimate: Lambda = {params_bkg.lambd.value}")
+    print(f"Final estimate: Lambda = {fitted_params.lambd.value}")
 
     fig, ax = plt.subplots()
     ax.set_xlabel("$m_{\gamma\gamma}$ [GeV]")
     x = np.linspace(100, 180, 1000)
-    model_bkg = EVMExponential(mass, lambd=params_bkg.lambd)
+    model_bkg = EVMExponential(mass, lambd=fitted_params.lambd)
     y = model_bkg(x)
     ax.plot(x, y, label="fit")
     ax.legend()
@@ -227,24 +200,23 @@ if __name__ == "__main__":
     lumi_par = evm.Parameter(
         value=lumi, name="lumi", lower=0.0, upper=1000000.0, frozen=True
     )
-    r = evm.Parameter(value=1.0, name="r", lower=0.0, upper=20.0)
-
+    r = evm.Parameter(
+        value=1.0, name="r", lower=0.0, upper=20.0, transform=minuit_transform
+    )
 
     def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
-
 
     norm_bkg = evm.Parameter(
         value=float(df_data.shape[0]),
         name="model_bkg_Tag0_norm",
         lower=0.0,
         upper=float(3 * df_data.shape[0]),
+        transform=minuit_transform,
     )
-
 
     def total_rate(r, xs_ggH, br_hgg, eff, lumi, model_bkg_norm):
         return r * xs_ggH * br_hgg * eff * lumi + model_bkg_norm
-
 
     class ParamsCard(NamedTuple):
         higgs_mass: evm.Parameter
@@ -257,7 +229,6 @@ if __name__ == "__main__":
         eff: evm.Parameter
         lumi: evm.Parameter
         model_bkg_norm: evm.Parameter
-
 
     # redefine sigma and d_higgs_mass with the best value from before such that they are now frozen
     sigma = evm.Parameter(
@@ -280,9 +251,9 @@ if __name__ == "__main__":
     )
 
     # === Loss Function ===
-    @jax.jit
+    @eqx.filter_jit
     def loss_fn_card(diffable, static, data):
-        params = eqx.combine(diffable, static)
+        params = wrap(evm.parameter.combine(diffable, static))
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
                 params.r.value,
@@ -293,174 +264,83 @@ if __name__ == "__main__":
             ),
             name="signal_rate",
         )
-        model_bkg = EVMExponential(var=mass, lambd=params.lambd, extended=params.model_bkg_norm)
+        model_bkg = EVMExponential(
+            var=mass, lambd=params.lambd, extended=params.model_bkg_norm
+        )
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
-        model_ggH = EVMGaussian(var=mass, mu=composed_mu, sigma=params.sigma, extended=signal_rate)
+        model_ggH = EVMGaussian(
+            var=mass, mu=composed_mu, sigma=params.sigma, extended=signal_rate
+        )
         model = EVMSumPDF(var=mass, pdfs=[model_ggH, model_bkg])
         nll = ExtendedNLL(model=model)
-        #nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
+        # nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
         return nll(data)
 
+    diffable, static = evm.parameter.partition(unwrap(params_card))
 
-    # === Optimizer (adam) ===
-    optimizer = optax.adam(**optimizer_settings)
-    opt_state = optimizer.init(eqx.filter(params_card, eqx.is_inexact_array))
+    def optx_loss_fn(diffable, args):
+        return loss_fn_card(diffable, *args)
 
+    fitresult = optimistix.minimise(
+        optx_loss_fn,
+        solver,
+        diffable,
+        has_aux=False,
+        args=(static, data_sides),
+        options={},
+        max_steps=1000,
+        throw=True,
+    )
+    fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
 
-    # === Training Step ===
-    @jax.jit
-    def step_card(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
-        loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = eqx.apply_updates(params, updates)
-        return params, opt_state, loss
-
-
-    # === Training Loop ===
-    num_epochs = 1000
-    for epoch in range(num_epochs):
-        #params_card, opt_state, loss = step_card(params_card, opt_state, data_sides)
-        params_card, opt_state, loss = step_card(params_card, opt_state, data_array)
-        if epoch % 100 == 0:
-            print(f"{epoch=}: Loss = {loss:.4f}, r = {params_card.r.value}")
-            print(f"alpha = {params_card.lambd.value}")
-            print(f"Bkg = {params_card.model_bkg_norm.value}")
-
-    denominator = loss
+    denominator = loss_fn_card(fitresult.value, static, data)
 
     # === Final Results ===
-    print(f"Final estimate: r = {params_card.r.value}\n")
+    print(f"Final estimate: r = {fitted_params.r.value}\n")
 
     # === Scan for r ===
     print("Scanning for r")
 
     # based on https://github.com/pfackeldey/evermore/blob/main/examples/nll_profiling.py
-    def fixed_mu_fit(mu, silent=True):
-        xs_ggH_par = evm.Parameter(
-            value=xs_ggH, name="xs_ggH", lower=0.0, upper=100.0, frozen=True
-        )
-        br_hgg_par = evm.Parameter(
-            value=br_hgg, name="br_hgg", lower=0.0, upper=1.0, frozen=True
-        )
-        eff_par = evm.Parameter(value=eff, name="eff", lower=0.0, upper=1.0, frozen=True)
-        lumi_par = evm.Parameter(
-            value=lumi, name="lumi", lower=0.0, upper=1000000.0, frozen=True
-        )
-        r = evm.Parameter(
-            value=mu.astype(float), name="r", lower=0.0, upper=20.0, frozen=True
-        )
+    def fixed_mu_fit(mu, silent=True, params_card=params_card):
+        params_card = eqx.tree_at(lambda t: t.r.value, params_card, mu)
+        params_card = eqx.tree_at(lambda t: t.r.frozen, params_card, True)
 
-        def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
-            return r * xs_ggH * br_hgg * eff * lumi
+        diffable, static = evm.parameter.partition(unwrap(params_card))
 
-        norm_bkg = evm.Parameter(
-            value=params_card.model_bkg_norm.value,
-            name="model_bkg_Tag0_norm",
-            lower=0.0,
-            upper=float(3 * df_data.shape[0]),
+        def optx_loss_fn(diffable, args):
+            return loss_fn_card(diffable, *args)
+
+        fitresult = optimistix.minimise(
+            optx_loss_fn,
+            solver,
+            diffable,
+            has_aux=False,
+            args=(static, data_sides),
+            options={},
+            max_steps=1000,
+            throw=True,
         )
-        lambd = evm.Parameter(
-            value=params_card.lambd.value, name="lambda", lower=0.0, upper=0.2
-        )
+        fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+        loss = loss_fn_card(fitresult.value, static, data_sides)
 
-        # redefine sigma and d_higgs_mass with the best value from before such that they are now frozen
-        sigma = evm.Parameter(
-            value=params.sigma.value, name="sigma", lower=1.0, upper=5.0, frozen=True
-        )
-        d_higgs_mass = evm.Parameter(
-            value=params.d_higgs_mass.value, name="dMH", lower=-1.0, upper=1.0, frozen=True
-        )
-
-        params_card_inside = ParamsCard(
-            higgs_mass,
-            d_higgs_mass,
-            sigma,
-            lambd,
-            r,
-            xs_ggH_par,
-            br_hgg_par,
-            eff_par,
-            lumi_par,
-            norm_bkg,
-        )
-
-        @jax.jit
-        def loss_fn_card_inside(diffable, static, data):
-            params = eqx.combine(diffable, static)
-            # total_rate_par = evm.Parameter(total_rate(params.r.value, params.xs_ggH.value, params.br_hgg.value, params.eff.value, params.lumi.value, params.model_bkg_norm.value), name="total_rate")
-            signal_rate = evm.Parameter(
-                model_ggH_Tag0_norm_function(
-                    params.r.value,
-                    params.xs_ggH.value,
-                    params.br_hgg.value,
-                    params.eff.value,
-                    params.lumi.value,
-                ),
-                name="signal_rate",
-            )
-            model_bkg = EVMExponential(
-                var=mass, lambd=params.lambd, extended=params.model_bkg_norm
-            )
-            composed_mu = evm.Parameter(
-                mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
-            )
-            model_ggH = EVMGaussian(
-                var=mass, mu=composed_mu, sigma=params.sigma, extended=signal_rate
-            )
-            model = EVMSumPDF(var=mass, pdfs=[model_ggH, model_bkg])
-            nll = ExtendedNLL(model=model)
-            #nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
-            return nll(data)
-
-        optimizer = optax.adam(**optimizer_settings)
-        opt_state = optimizer.init(eqx.filter(params_card_inside, eqx.is_inexact_array))
-
-        @jax.jit
-        def step_card_inside(params, opt_state, data):
-            diffable, static = evm.parameter.partition(params)
-            # loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
-            grads = eqx.filter_grad(loss_fn_card_inside)(diffable, static, data)
-            updates, opt_state = optimizer.update(grads, opt_state)
-            params = eqx.apply_updates(params, updates)
-            return params, opt_state
-
-        # minimize model with 1000 steps
         if not silent:
-            print(f"\nr = {mu}")
-
-        num_epochs = 1000
-        early_stopper = EarlyStopper(min_delta=0.001, patience=5)
-        for epoch in range(num_epochs):
-            model, opt_state = step_card_inside(params_card_inside, opt_state, data_sides)
-            dynamic_model, static_model = evm.parameter.partition(model)
-            loss = loss_fn_card_inside(dynamic_model, static_model, data_sides)
-            if epoch % 100 == 0 and not silent:
-                print(f"{epoch=}: alpha = {model.lambd.value}")
-            early_stopper(loss)
-            if early_stopper.early_stop:
-                print(f"Early stopping at epoch {epoch} with loss {loss:.4f}")
-                break
-
-        #if not silent:
-        #    print(
-        #        f"mu = {mu}, loss = {loss:.4f}, lambd = {dynamic_model.lambd.value.astype(float)}, bkg_norm = {dynamic_model.model_bkg_norm.value.astype(float)}"
-        #    )
+            print(
+                f"mu = {mu}, loss = {loss:.4f}, lambd = {fitted_params.lambd.value.astype(float)}, bkg_norm = {fitted_params.model_bkg_norm.value.astype(float)}"
+            )
         return 2 * (loss - denominator)
 
-
-    mus = jnp.linspace(0.7, 2.1, 15)
+    mus = jnp.linspace(0.95, 2.15, 20)
     two_nlls = []
     for mu in mus:
-        two_nll = fixed_mu_fit(mu, silent=True)
+        two_nll = fixed_mu_fit(mu, silent=True, params_card=params_card)
         print(f"|> {mu=:.2f} -> {two_nll=:.2f}")
         two_nlls.append(two_nll)
 
     # vectorized version
     # two_nlls = jax.vmap(fixed_mu_fit)(mus)
-
 
     # plot
     print("\nPlotting scan")
