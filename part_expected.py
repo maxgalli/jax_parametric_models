@@ -15,8 +15,11 @@ from dask.distributed import Client
 
 from utils import plot_as_data
 from utils import save_image
+from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+import optimistix
 
-from distributions import EVMExponential, EVMGaussian, EVMMixture, ExtendedNLL
+
+from distributions import EVMExponential, EVMGaussian, EVMSumPDF, ExtendedNLL
 
 # double precision
 jax.config.update("jax_enable_x64", True)
@@ -26,6 +29,15 @@ hep.style.use("CMS")
 
 def main():
     # gauss for signal
+    true_mean = 125.0
+
+    mass = evm.Parameter(
+        value=true_mean,
+        name="CMS_hgg_mass",
+        lower=100.0,
+        upper=180.0,
+        frozen=False,
+    )
     higgs_mass = evm.Parameter(
         value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True
     )
@@ -39,8 +51,6 @@ def main():
         mean_function(higgs_mass.value, d_higgs_mass.value)
     )
 
-    gauss = EVMGaussian(composed_mu, sigma)
-
     # norm signal
     data_dir = "../StatsStudies/ExercisesForCourse/Hgg_zfit/data"
     fl = os.path.join(data_dir, "mc_part1.parquet")
@@ -50,6 +60,8 @@ def main():
     sumw = df["weight"].sum()
     eff = sumw / (xs_ggH * br_hgg)
     lumi = 138000.0
+
+    minuit_transform = MinuitTransform()
 
     xs_ggH_par = evm.Parameter(
         value=xs_ggH, name="xs_ggH", lower=0.0, upper=100.0, frozen=True
@@ -61,7 +73,7 @@ def main():
     lumi_par = evm.Parameter(
         value=lumi, name="lumi", lower=0.0, upper=1000000.0, frozen=True
     )
-    r = evm.Parameter(value=0.5, name="r", lower=0.0, upper=20.0)
+    r = evm.Parameter(value=0.5, name="r", lower=0.0, upper=20.0, transform=minuit_transform)
 
     def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
@@ -78,9 +90,12 @@ def main():
     )
     print(signal_rate.value)
 
+    # signal
+    gauss = EVMGaussian(var=mass, mu=composed_mu, sigma=sigma, extended=signal_rate)
+
+
     # background
     lam = evm.Parameter(value=0.05, name="lambda", lower=0, upper=0.2, frozen=True)
-    bkg = EVMExponential(lam)
 
     # background rate
     fl_data = os.path.join(data_dir, "data_part1.parquet")
@@ -92,38 +107,39 @@ def main():
         lower=0.0,
         upper=float(3 * df_data.shape[0]),
         frozen=False,
+        transform=minuit_transform,
     )
     print(norm_bkg.value)
+    bkg = EVMExponential(var=mass,lambd=lam, extended=norm_bkg)
+
     # full model
-    model = EVMMixture(
-        components=[gauss, bkg],
-        weights=[signal_rate, norm_bkg],
+    model = EVMSumPDF(
+        var=mass,
+        pdfs=[gauss, bkg],
     )
 
     #nevents = len(df_data)
-    nevents = 10181
-    print("number of events:", nevents)
-    ntoys = 100
+    # nevents = 10181
+    # print("number of events:", nevents)
+    ntoys = 20
     key = jax.random.PRNGKey(0)
-    toy_list = []
-    for i in range(1, 10):
-        toy = model.sample(
-            seed=key,
-            #sample_shape=(nevents,),
-            sample_shape=(ntoys, nevents), # (number_of_toys, nevents)
-            xmin=df_data["CMS_hgg_mass"].min(),
-            xmax=df_data["CMS_hgg_mass"].max(), 
-            #xmax=250.0,  # max mass
-        )
-        toy_list.append(toy)
+
+    toy = jax.vmap(model.sample)(jax.random.split(key, ntoys))
+    # toy = [
+    #     model.sample(
+    #         key=key,
+    #         #sample_shape=(nevents,),
+    #         # xmin=df_data["CMS_hgg_mass"].min(),
+    #         # xmax=df_data["CMS_hgg_mass"].max(),
+    #         #xmax=250.0,  # max mass
+    #     ) for key in jax.random.split(key, ntoys)
+    # ]
     # concatenate
-    toy = jnp.concatenate(toy_list, axis=0)
     #toy = toy[0]  # take the first toy
-    toys = [t for t in toy]  # list of toys
     # plot the toy
     fig, ax = plt.subplots()
     ax.hist(
-        toys[:10],
+        toy[:10],
         bins=50,
         histtype="step",
         #label="Toy data",
@@ -164,9 +180,9 @@ def main():
         )
 
     # === Loss Function ===
-    @jax.jit
+    @eqx.filter_jit
     def loss_fn_card(diffable, static, data):
-        params = eqx.combine(diffable, static)
+        params = wrap(evm.parameter.combine(diffable, static))
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
                 params.r.value,
@@ -177,57 +193,42 @@ def main():
             ),
             name="signal_rate",
         )
-        model_bkg = EVMExponential(params.lambd)
+        model_bkg = EVMExponential(var=mass,lambd=params.lambd, extended=params.model_bkg_norm)
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
-        model_ggH = EVMGaussian(composed_mu, params.sigma)
+        model_ggH = EVMGaussian(var=mass,mu=composed_mu, sigma=params.sigma, extended=signal_rate)
+        model= EVMSumPDF(var=mass, pdfs=[model_bkg, model_ggH])
         #nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
-        nll = ExtendedNLL([model_ggH, model_bkg], [signal_rate, params.model_bkg_norm])
+        nll = ExtendedNLL(model)
         return nll(data)
 
-    # === Optimizer (adam) ===
-    optimizer_settings = dict(learning_rate=3e-3, b1=0.999)
-    optimizer = optax.adam(**optimizer_settings)
-    def make_opt_state(params):
-        return optimizer.init(eqx.filter(params, eqx.is_inexact_array))
-    #opt_state = optimizer.init(eqx.filter(params_card, eqx.is_inexact_array))
 
-    num_epochs = 1000
+    diffable, static = evm.parameter.partition(unwrap(make_params_card()))
 
-    # === Training Step ===
-    @jax.jit
-    def step_card(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
-        loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = eqx.apply_updates(params, updates)
-        return params, opt_state, loss
+    def optx_loss_fn(diffable, args):
+        return loss_fn_card(diffable, *args)
+
+    solver = optimistix.BFGS(
+        rtol=1e-5, atol=1e-7, verbose=frozenset({"step_size", "loss"})
+    )
+
+    from IPython import embed; embed()
     
-    def train(data, params, opt_state):
-        for epoch in range(num_epochs):
-            params, opt_state, loss = step_card(
-                params, opt_state, data
-            )
-            if epoch % 100 == 0:
-                r_val = params.r.value[0]
-                print(f"Epoch {epoch}, Loss: {loss:.4f}")
-                #print(f"r = {r_val}")
-                print(f"r = {r_val:.4f}")
-                #print(f"lambd = {params_card.lambd.value:.4f}")
-        return params
-
-    # === Training ===
-    params_card_list = []
-    opt_state_list = []
     params_after = []
-    for t in toys:
-        #params_card_list.append(deepcopy(params_card))
-        #opt_state_list.append(deepcopy(opt_state))
-        params_card = make_params_card()
-        opt_state = make_opt_state(params_card)
-        params_card_list.append(params_card)
-        opt_state_list.append(opt_state)
+    for t in toy:
+        fitresult = optimistix.minimise(
+            optx_loss_fn,
+            solver,
+            diffable,
+            has_aux=False,
+            args=(static, t),
+            options={},
+            max_steps=1000,
+            throw=True,
+        )
+        fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+        params_after.append(fitted_params)
 
     #for i, t in enumerate(toys):
     #    np = train(t, params_card_list[i], opt_state_list[i])
@@ -241,15 +242,6 @@ def main():
     #    jnp.array(params_card_list),
     #    jnp.array(opt_state_list)
     #    )
-    
-    client = Client()
-    params_after = client.map(
-        train,
-        toys,
-        params_card_list,
-        opt_state_list,
-    )
-    params_after = client.gather(params_after)
     
     dist_r = jnp.array([p.r.value for p in params_after])
     mean_r = jnp.mean(dist_r)

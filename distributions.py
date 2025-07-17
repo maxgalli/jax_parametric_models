@@ -105,8 +105,8 @@ class EVMExponential(EVMDistribution):
         return jnp.exp(-self.lambd.value * value)
 
     def sample(self, sample_shape, seed=None, **kwargs):
-        lower = self.var.lower[0]
-        upper = self.var.upper[0]
+        lower = self.var.lower
+        upper = self.var.upper
         """Sample from a truncated exponential between xmin and xmax."""
         u = jax.random.uniform(seed, shape=sample_shape)
         lambda_val = self.lambd.value
@@ -137,8 +137,17 @@ class EVMSumPDF(EVMDistribution):
         #norm = self.integrate()
         #return self.unnormalized_prob(x) / norm
         return self.unnormalized_prob(x)
+    
+    def sample(self, key):
+        samples = []
+        for pdf in self.pdfs:
+            n2 = jax.random.poisson(lam=pdf.extended, key=key, shape=())
+            n2 = jnp.asarray(n2, dtype=jnp.int64)
+            sample = pdf.sample(sample_shape=(n2,), seed=key)
+            samples.append(sample)
+        return jnp.concatenate(samples, axis=-1)
 
-    def sample(self, seed, sample_shape=(), **kwargs):
+    def _sample(self, seed, sample_shape=(), **kwargs):
         # one key per toy
         keys = jax.random.split(seed, sample_shape[0])
         samples = []
