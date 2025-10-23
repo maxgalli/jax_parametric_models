@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paramore"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "evermore>=0.3.2",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "mplhep",
+    "pyarrow",
+    "iminuit",
+    "ipython",
+    "jax",
+    "jaxlib",
+    "tqdm",
+    "optax",
+    "optimistix",
+    "dask",
+    "distributed",
+    "quadax",
+]
+
+[tool.setuptools]
+"package-dir" = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

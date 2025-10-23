@@ -1,0 +1,18 @@
+name: parametric_models
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scipy
+  - scikit-learn
+  - jupyterlab
+  - ipython
+  - jax
+  - jaxlib
+  - tqdm
+  - pip
