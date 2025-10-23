@@ -6,3 +6,4 @@ figures_part1
 uv.lock
 .DS_Store
 examples/figures*
+*.egg-info/
