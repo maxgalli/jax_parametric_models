@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import NamedTuple
 
 import equinox as eqx
@@ -12,13 +13,14 @@ import pandas as pd
 from scipy import interpolate
 import optimistix
 
-from distributions import (
+from paramore import (
     EVMExponential,
     EVMGaussian,
     EVMSumPDF,
     ExtendedNLL,
+    plot_as_data,
+    save_image,
 )
-from utils import plot_as_data, save_image
 from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 
 # double precision
@@ -30,9 +32,10 @@ hep.style.use("CMS")
 
 if __name__ == "__main__":
     # Signal modelling
-    data_dir = "../StatsStudies/ExercisesForCourse/Hgg_zfit/data"
-    fl = os.path.join(data_dir, "mc_part1.parquet")
-    output_dir = "figures_part1"
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / "data"
+    fl = data_dir / "mc_part1.parquet"
+    output_dir = base_dir / "figures_part1"
     os.makedirs(output_dir, exist_ok=True)
     df = pd.read_parquet(fl)
     var_name = "CMS_hgg_mass"
@@ -84,7 +87,7 @@ if __name__ == "__main__":
     # === Loss Function ===
     @eqx.filter_jit
     def loss_fn(diffable, static, data):
-        params = wrap(evm.parameter.combine(diffable, static))
+        params = wrap(evm.tree.combine(diffable, static))
         std = params.sigma
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
@@ -93,7 +96,7 @@ if __name__ == "__main__":
         nll = NLL(model, data)
         return nll()
 
-    diffable, static = evm.parameter.partition(unwrap(params))
+    diffable, static = evm.tree.partition(unwrap(params))
 
     def optx_loss_fn(diffable, args):
         return loss_fn(diffable, *args)
@@ -111,7 +114,7 @@ if __name__ == "__main__":
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
 
     # === Final Results ===
     print(f"Final estimate: Std = {fitted_params.sigma.value}")
@@ -133,7 +136,7 @@ if __name__ == "__main__":
         f"For 138 fb^-1, the expected number of ggH events is: N = xs * BR * eff * lumi = {n:.5f}"
     )
 
-    fl_data = os.path.join(data_dir, "data_part1.parquet")
+    fl_data = data_dir / "data_part1.parquet"
     df_data = pd.read_parquet(fl_data)
     data_array = jax.numpy.array(df_data[var_name].values)
     var_name = "CMS_hgg_mass"
@@ -153,12 +156,12 @@ if __name__ == "__main__":
 
     @eqx.filter_jit
     def loss_fn_bkg(diffable, static, data):
-        params = wrap(evm.parameter.combine(diffable, static))
+        params = wrap(evm.tree.combine(diffable, static))
         model = EVMExponential(mass, lambd=params.lambd)
         nll = NLL(model, data)
         return nll()
 
-    diffable, static = evm.parameter.partition(unwrap(params_bkg))
+    diffable, static = evm.tree.partition(unwrap(params_bkg))
 
     def optx_loss_fn(diffable, args):
         return loss_fn_bkg(diffable, *args)
@@ -173,7 +176,7 @@ if __name__ == "__main__":
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
 
     # === Final Results ===
     print(f"Final estimate: Lambda = {fitted_params.lambd.value}")
@@ -253,7 +256,7 @@ if __name__ == "__main__":
     # === Loss Function ===
     @eqx.filter_jit
     def loss_fn_card(diffable, static, data):
-        params = wrap(evm.parameter.combine(diffable, static))
+        params = wrap(evm.tree.combine(diffable, static))
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
                 params.r.value,
@@ -278,7 +281,7 @@ if __name__ == "__main__":
         # nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
         return nll(data)
 
-    diffable, static = evm.parameter.partition(unwrap(params_card))
+    diffable, static = evm.tree.partition(unwrap(params_card))
 
     def optx_loss_fn(diffable, args):
         return loss_fn_card(diffable, *args)
@@ -293,7 +296,7 @@ if __name__ == "__main__":
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
 
     denominator = loss_fn_card(fitresult.value, static, data)
 
@@ -308,7 +311,7 @@ if __name__ == "__main__":
         params_card = eqx.tree_at(lambda t: t.r.value, params_card, mu)
         params_card = eqx.tree_at(lambda t: t.r.frozen, params_card, True)
 
-        diffable, static = evm.parameter.partition(unwrap(params_card))
+        diffable, static = evm.tree.partition(unwrap(params_card))
 
         def optx_loss_fn(diffable, args):
             return loss_fn_card(diffable, *args)
@@ -323,7 +326,7 @@ if __name__ == "__main__":
             max_steps=1000,
             throw=True,
         )
-        fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+        fitted_params = wrap(evm.tree.combine(fitresult.value, static))
         loss = loss_fn_card(fitresult.value, static, data_sides)
 
         if not silent:

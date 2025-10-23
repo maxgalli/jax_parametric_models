@@ -10,12 +10,16 @@ import equinox as eqx
 from typing import NamedTuple, List
 import jax
 import optax
+from pathlib import Path
 
-
-from utils import plot_as_data
-from utils import save_image
-
-from distributions import EVMExponential, EVMGaussian, ExtendedNLL, GaussianConstraint
+from paramore import (
+    EVMExponential,
+    EVMGaussian,
+    ExtendedNLL,
+    GaussianConstraint,
+    plot_as_data,
+    save_image,
+)
 
 
 # double precision
@@ -26,8 +30,9 @@ hep.style.use("CMS")
 
 if __name__ == "__main__":
     # Signal modelling
-    data_dir = "../StatsStudies/ExercisesForCourse/Hgg_zfit/data"
-    fl = os.path.join(data_dir, "mc_part1.parquet")
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / "data"
+    fl = data_dir / "mc_part1.parquet"
     output_dir = "figures_part1"
     os.makedirs(output_dir, exist_ok=True)
     df = pd.read_parquet(fl)
@@ -92,7 +97,7 @@ if __name__ == "__main__":
     # === Training Step ===
     @jax.jit
     def step(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
+        diffable, static = evm.tree.partition(params)
         loss, grads = jax.value_and_grad(loss_fn)(diffable, static, data)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = eqx.apply_updates(params, updates)
@@ -127,7 +132,7 @@ if __name__ == "__main__":
         f"For 138 fb^-1, the expected number of ggH events is: N = xs * BR * eff * lumi = {n:.5f}"
     )
 
-    fl_data = os.path.join(data_dir, "data_part1.parquet")
+    fl_data = data_dir / "data_part1.parquet"
     df_data = pd.read_parquet(fl_data)
     var_name = "CMS_hgg_mass"
     # df_data_sides = df_data[(df_data[var_name] > 100) & (df_data[var_name] < 115) | (df_data[var_name] > 135) & (df_data[var_name] < 180)]
@@ -158,7 +163,7 @@ if __name__ == "__main__":
     # === Training Step ===
     @jax.jit
     def step_bkg(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
+        diffable, static = evm.tree.partition(params)
         loss, grads = jax.value_and_grad(loss_fn_bkg)(diffable, static, data)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = eqx.apply_updates(params, updates)
@@ -186,8 +191,10 @@ if __name__ == "__main__":
     ###
     # systematics
     ###
-    output_dir = "figures_part3_zfit"
-    nominal_file = "mc_part3_ggH_Tag0.parquet"
+    output_dir = base_dir / "figures_part3_zfit"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    samples_dir = Path(__file__).resolve().parent / "samples"
+    nominal_file = samples_dir / "mc_part3_ggH_Tag0.parquet"
     file_template = "mc_part3_ggH_Tag0_{}01Sigma.parquet"
     var_name = "CMS_hgg_mass"
 
@@ -199,7 +206,7 @@ if __name__ == "__main__":
     #for sys in ["JEC", "photonID"]:
     for sys in ["photonID"]:
         for direction in ["Up", "Down"]:
-            fl = file_template.format(sys + direction)
+            fl = samples_dir / file_template.format(sys + direction)
             df = pd.read_parquet(fl)
             numerator = df[var_name] * df["weight"]
             denominator = df_nominal[var_name] * df_nominal["weight"]
@@ -337,7 +344,7 @@ if __name__ == "__main__":
     # === Training Step ===
     @jax.jit
     def step_card(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
+        diffable, static = evm.tree.partition(params)
         loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = eqx.apply_updates(params, updates)

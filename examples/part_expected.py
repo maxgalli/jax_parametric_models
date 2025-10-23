@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import mplhep as hep
 from scipy import interpolate
-import os
+from pathlib import Path
 import jax.numpy as jnp
 import evermore as evm
 import equinox as eqx
@@ -13,13 +13,16 @@ import optax
 from copy import deepcopy
 from dask.distributed import Client
 
-from utils import plot_as_data
-from utils import save_image
+from paramore import (
+    EVMExponential,
+    EVMGaussian,
+    EVMSumPDF,
+    ExtendedNLL,
+    plot_as_data,
+    save_image,
+)
 from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 import optimistix
-
-
-from distributions import EVMExponential, EVMGaussian, EVMSumPDF, ExtendedNLL
 
 # double precision
 jax.config.update("jax_enable_x64", True)
@@ -52,8 +55,9 @@ def main():
     )
 
     # norm signal
-    data_dir = "../StatsStudies/ExercisesForCourse/Hgg_zfit/data"
-    fl = os.path.join(data_dir, "mc_part1.parquet")
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / "data"
+    fl = data_dir / "mc_part1.parquet"
     df = pd.read_parquet(fl)
     xs_ggH = 48.58  # pb
     br_hgg = 0.0027
@@ -98,7 +102,7 @@ def main():
     lam = evm.Parameter(value=0.05, name="lambda", lower=0, upper=0.2, frozen=True)
 
     # background rate
-    fl_data = os.path.join(data_dir, "data_part1.parquet")
+    fl_data = data_dir / "data_part1.parquet"
     df_data = pd.read_parquet(fl_data)
 
     norm_bkg = evm.Parameter(
@@ -148,7 +152,8 @@ def main():
         #density=True,
     )
     ax.set_ylabel("Events")
-    output_dir = "figures_part1"
+    output_dir = base_dir / "figures_part1"
+    output_dir.mkdir(parents=True, exist_ok=True)
     save_image("toy_data", output_dir)
 
     # best fit on toys
@@ -182,7 +187,7 @@ def main():
     # === Loss Function ===
     @eqx.filter_jit
     def loss_fn_card(diffable, static, data):
-        params = wrap(evm.parameter.combine(diffable, static))
+        params = wrap(evm.tree.combine(diffable, static))
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
                 params.r.value,
@@ -204,7 +209,7 @@ def main():
         return nll(data)
 
 
-    diffable, static = evm.parameter.partition(unwrap(make_params_card()))
+    diffable, static = evm.tree.partition(unwrap(make_params_card()))
 
     def optx_loss_fn(diffable, args):
         return loss_fn_card(diffable, *args)
@@ -227,7 +232,7 @@ def main():
             max_steps=1000,
             throw=True,
         )
-        fitted_params = wrap(evm.parameter.combine(fitresult.value, static))
+        fitted_params = wrap(evm.tree.combine(fitresult.value, static))
         params_after.append(fitted_params)
 
     #for i, t in enumerate(toys):

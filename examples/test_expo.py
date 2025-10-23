@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
-import os
+from pathlib import Path
 import pandas as pd
 
 # === Exponential Model ===
@@ -35,8 +35,9 @@ key = jax.random.PRNGKey(0)
 true_lambda = 2.0  # True rate parameter
 num_samples = 100
 #data = jax.random.exponential(key, shape=(num_samples,)) / true_lambda  # Exponential-distributed data
-data_dir = "../StatsStudies/ExercisesForCourse/Hgg_zfit/data"
-fl_data = os.path.join(data_dir, "data_part1.parquet")
+base_dir = Path(__file__).resolve().parent
+data_dir = base_dir / "data"
+fl_data = data_dir / "data_part1.parquet"
 df_data = pd.read_parquet(fl_data)
 var_name = "CMS_hgg_mass"
 #df_data_sides = df_data[(df_data[var_name] > 100) & (df_data[var_name] < 115) | (df_data[var_name] > 135) & (df_data[var_name] < 180)]

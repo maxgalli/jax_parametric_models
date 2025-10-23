@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import mplhep as hep
 from scipy import interpolate
-import os
+from pathlib import Path
 import jax.numpy as jnp
 import evermore as evm
 import equinox as eqx
@@ -13,10 +13,13 @@ import optax
 from copy import deepcopy
 from dask.distributed import Client
 
-from utils import plot_as_data
-from utils import save_image
-
-from distributions import EVMExponential, EVMGaussian, EVMMixture, ExtendedNLL
+from paramore import (
+    EVMExponential,
+    EVMGaussian,
+    ExtendedNLL,
+    plot_as_data,
+    save_image,
+)
 
 # double precision
 jax.config.update("jax_enable_x64", True)
@@ -43,8 +46,9 @@ def main():
     #model = EVMGaussian(higgs_mass, sigma)
 
     # norm signal
-    data_dir = "../StatsStudies/ExercisesForCourse/Hgg_zfit/data"
-    fl = os.path.join(data_dir, "mc_part1.parquet")
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / "data"
+    fl = data_dir / "mc_part1.parquet"
     df = pd.read_parquet(fl)
     xs_ggH = 48.58  # pb
     br_hgg = 0.0027
@@ -53,7 +57,7 @@ def main():
     lumi = 138000.0
 
     # background rate
-    fl_data = os.path.join(data_dir, "data_part1.parquet")
+    fl_data = data_dir / "data_part1.parquet"
     df_data = pd.read_parquet(fl_data)
 
     norm_bkg = evm.Parameter(
@@ -95,7 +99,8 @@ def main():
         #density=True,
     )
     ax.set_ylabel("Events")
-    output_dir = "figures_part1"
+    output_dir = base_dir / "figures_part1"
+    output_dir.mkdir(parents=True, exist_ok=True)
     save_image("toy_data", output_dir)
 
     # best fit on toys
@@ -136,7 +141,7 @@ def main():
     # === Training Step ===
     @jax.jit
     def step_card(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
+        diffable, static = evm.tree.partition(params)
         loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = eqx.apply_updates(params, updates)
@@ -240,7 +245,7 @@ def main():
 #    # training step
 #    @jax.jit
 #    def step(params, opt_state, data):
-#        #diffable, static = evm.parameter.partition(params)
+#        #diffable, static = evm.tree.partition(params)
 #        loss, grads = jax.value_and_grad(loss_fn)(params, data)
 #        updates, opt_state = optimizer.update(grads, opt_state)
 #        params = eqx.apply_updates(params, updates)

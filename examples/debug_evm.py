@@ -12,10 +12,15 @@ import jax
 from jax import lax
 import optax
 
-from utils import plot_as_data
-from utils import save_image
-
-from distributions import EVMExponential, EVMGaussian, ExtendedNLL, GaussianConstraint, EVMSumPDF
+from paramore import (
+    EVMExponential,
+    EVMGaussian,
+    ExtendedNLL,
+    GaussianConstraint,
+    EVMSumPDF,
+    plot_as_data,
+    save_image,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -72,7 +77,7 @@ if __name__ == "__main__":
     # === Training Step ===
     @jax.jit
     def step_card(params, opt_state, data):
-        diffable, static = evm.parameter.partition(params)
+        diffable, static = evm.tree.partition(params)
         loss, grads = jax.value_and_grad(loss_fn_card)(diffable, static, data)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = eqx.apply_updates(params, updates)
