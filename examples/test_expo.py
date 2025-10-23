@@ -36,7 +36,7 @@ true_lambda = 2.0  # True rate parameter
 num_samples = 100
 #data = jax.random.exponential(key, shape=(num_samples,)) / true_lambda  # Exponential-distributed data
 base_dir = Path(__file__).resolve().parent
-data_dir = base_dir / "data"
+data_dir = base_dir / "samples"
 fl_data = data_dir / "data_part1.parquet"
 df_data = pd.read_parquet(fl_data)
 var_name = "CMS_hgg_mass"

@@ -33,7 +33,6 @@ class Gauss:
             epsabs=epsabs,
             epsrel=epsrel,
         )
-        print("diocane")
         print(integral)
         return integral
 

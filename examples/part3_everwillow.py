@@ -39,7 +39,7 @@ if __name__ == "__main__":
     br_hgg = 0.0027
     lumi = 138000.0
     base_dir = Path(__file__).resolve().parent
-    data_dir = base_dir / "data"
+    data_dir = base_dir / "samples"
     fl = data_dir / "mc_part1.parquet"
     df = pd.read_parquet(fl)
     sumw = df["weight"].sum()

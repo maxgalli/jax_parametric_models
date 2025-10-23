@@ -56,7 +56,7 @@ def main():
 
     # norm signal
     base_dir = Path(__file__).resolve().parent
-    data_dir = base_dir / "data"
+    data_dir = base_dir / "samples"
     fl = data_dir / "mc_part1.parquet"
     df = pd.read_parquet(fl)
     xs_ggH = 48.58  # pb

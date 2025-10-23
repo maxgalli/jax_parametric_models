@@ -33,7 +33,7 @@ hep.style.use("CMS")
 if __name__ == "__main__":
     # Signal modelling
     base_dir = Path(__file__).resolve().parent
-    data_dir = base_dir / "data"
+    data_dir = base_dir / "samples"
     fl = data_dir / "mc_part1.parquet"
     output_dir = base_dir / "figures_part1"
     os.makedirs(output_dir, exist_ok=True)

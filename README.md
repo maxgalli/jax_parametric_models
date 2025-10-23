@@ -39,9 +39,9 @@ Key functionality is exposed via `paramore`, for example:
 from paramore import EVMGaussian, plot_as_data
 ```
 
-Example datasets live alongside the scripts:
-- `examples/data` holds `data_part1.parquet` and `mc_part1.parquet`
-- `examples/samples` provides the systematic variations for `part3.py`
+Example datasets live alongside the scripts in `examples/samples`:
+- `data_part1.parquet` and `mc_part1.parquet`
+- `mc_part3_ggH_Tag0.parquet` plus photon-ID variations
 
 ## Links
 
