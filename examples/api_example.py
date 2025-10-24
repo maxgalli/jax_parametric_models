@@ -7,11 +7,12 @@ from pathlib import Path
 import jax.numpy as jnp
 import evermore as evm
 import equinox as eqx
-from typing import NamedTuple, List
+from typing import NamedTuple, List, Set
 import jax
 import optax
 from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 import optimistix
+from jax.tree_util import tree_leaves
 
 
 from paramore import (
@@ -130,7 +131,7 @@ if __name__ == "__main__":
             pdfs=[signal_pdf, bkg_pdf],
         )
         return model
-    
+
     model = build_model(params)
     nll = ExtendedNLL(model=model)
     nll_val = nll(data)
@@ -141,7 +142,7 @@ if __name__ == "__main__":
         params = wrap(evm.tree.combine(diffable, static))
         model = build_model(params)
         nll = ExtendedNLL(model=model)
-        return nll(data) 
+        return nll(data)
 
     diffable, static = evm.tree.partition(unwrap(params))
 
@@ -164,3 +165,57 @@ if __name__ == "__main__":
     fitted_params = wrap(evm.tree.combine(fitresult.value, static))
 
     print(f"Final estimate: r = {fitted_params.mu.value}\n")
+
+    print("Scanning NLL vs mu...")
+
+    denominator = loss(fitresult.value, static, data)
+
+    def fixed_mu_fit(mu, silent=True, params=params):
+        params = eqx.tree_at(lambda p: p.mu.value, params, mu)
+        params = eqx.tree_at(lambda p: p.mu.frozen, params, True)
+
+        diffable, static = evm.tree.partition(unwrap(params))
+
+        fitresult = optimistix.minimise(
+            optx_loss_fn,
+            solver,
+            diffable,
+            has_aux=False,
+            args=(static, data),
+            options={},
+            max_steps=1000,
+            throw=True,
+        )
+        nll_val = loss(fitresult.value, static, data)
+
+        if not silent:
+            print(f"  mu = {mu:.3f} -> NLL = {nll_val:.3f}")
+
+        return 2 * (nll_val - denominator)
+
+    mu_values = jnp.linspace(0.01, 3.0, 20)
+    nll_values = []
+    for mu in mu_values:
+        nll_values.append(fixed_mu_fit(mu))
+
+    # plot
+    print("Plotting NLL scan...")
+    y = jnp.array(nll_values)
+    x = jnp.array(mu_values)
+
+    func = interpolate.interp1d(x, y, kind="cubic")
+    n_interp = 1000
+    x_interp = jnp.linspace(x[0], x[-1], n_interp)
+    y_interp = func(x_interp)
+    y_interp = y_interp - jnp.min(y_interp)
+    fig, ax = plt.subplots()
+    ax.plot(x_interp, y_interp, label="NLL Scan", color="black")
+    ax.set_xlabel(r"Signal strength $\mu$")
+    ax.set_ylabel(r"-2$\Delta$NLL")
+    ax.axhline(1.0, color="red", linestyle="--", label=r"$1\sigma$ interval")
+    ax.set_ylim(-1.0, 10)
+    ax.legend()
+    output_dir = base_dir / "figures_api_example"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_dir / "nll_scan.png")
+    plt.savefig(output_dir / "nll_scan.pdf")
