@@ -10,7 +10,8 @@ from quadax import romberg, quadgk
 import equinox as eqx
 import abc
 from jaxtyping import Array, Float
-from typing import Optional
+from typing import Optional, Set
+from jax.tree_util import tree_leaves
 
 
 class EVMDistribution(eqx.Module):
@@ -252,11 +253,6 @@ class ExtendedNLL(eqx.Module):
 
     model: EVMDistribution  # The model to compute the likelihood for
     #nus: list  # List of event yields (expected event counts per PDF)
-    constraints: Optional[list] = eqx.field(default=None)
-
-    def __post_init__(self):
-        if self.constraints is None:
-            self.constraints = []
 
     #def __init__(self, pdfs, nus, constraints=None):
     #    assert len(pdfs) == len(nus), (
@@ -281,9 +277,22 @@ class ExtendedNLL(eqx.Module):
             jnp.log(pdf + 1e-8)
         )  # Log-likelihood sum
 
-        # add constraints
-        constraint_term = sum(c() for c in self.constraints)
-        log_likelihood += constraint_term
+        # Add auxiliary terms from parameter priors (if present)
+        def _collect_prior_logprob(node, total, seen: Set[int]):
+            if isinstance(node, evm.Parameter):
+                node_id = id(node)
+                if node_id not in seen and getattr(node, "prior", None) is not None:
+                    seen.add(node_id)
+                    prior_val = node.prior.log_prob(node.value)
+                    total = total + jnp.sum(prior_val)
+            return total, seen
+
+        total = jnp.array(0.0)
+        seen: Set[int] = set()
+        for leaf in tree_leaves(self.model):
+            total, seen = _collect_prior_logprob(leaf, total, seen)
+
+        log_likelihood += total
 
         return jnp.squeeze(-log_likelihood)  # Negative log-likelihood for minimization
 
