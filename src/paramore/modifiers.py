@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 from typing import Callable
 
+import jax.numpy as jnp
 import evermore as evm
 import equinox as eqx
 
@@ -32,6 +33,7 @@ class SymmLogNormalModifier(Modifier):
 
     def apply(self, distribution: EVMDistribution) -> EVMDistribution:
         modifier = self.kappa ** self.parameter.value
+        #modifier = jnp.exp(jnp.log(self.kappa) * self.parameter.value)
         return eqx.tree_at(
             lambda dist: dist.extended,
             distribution,

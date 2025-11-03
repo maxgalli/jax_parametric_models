@@ -13,6 +13,7 @@ import optax
 from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 import optimistix
 from jax.tree_util import tree_leaves
+from jax.flatten_util import ravel_pytree
 
 
 from paramore import (
@@ -86,10 +87,12 @@ if __name__ == "__main__":
             value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True
         ),
         d_higgs_mass=evm.Parameter(
-            0.0, name="d_higgs_mass", lower=-1.0, upper=1.0, transform=minuit_transform
+            #0.0, name="d_higgs_mass", lower=-1.0, upper=1.0, transform=minuit_transform, frozen=True
+            0.000848571, name="d_higgs_mass", lower=-5.0, upper=5.0, transform=minuit_transform, frozen=True
         ),
         higgs_width=evm.Parameter(
-            2.0, name="higgs_width", lower=1.0, upper=5.0, transform=minuit_transform
+            #2.0, name="higgs_width", lower=1.0, upper=5.0, transform=minuit_transform, frozen=True
+            1.99705, name="higgs_width", lower=1.0, upper=5.0, transform=minuit_transform, frozen=True
         ),
         lamb=evm.Parameter(
             0.1, name="lamb", lower=0.0, upper=1.0, transform=minuit_transform
@@ -135,16 +138,20 @@ if __name__ == "__main__":
     model = build_model(params)
     nll = ExtendedNLL(model=model)
     nll_val = nll(data)
-    print(f"Initial NLL: {nll_val}")
+    #print(f"Initial NLL: {nll_val}")
 
     @eqx.filter_jit
     def loss(diffable, static, data):
         params = wrap(evm.tree.combine(diffable, static))
         model = build_model(params)
         nll = ExtendedNLL(model=model)
+        p = wrap(params)
+        #print(p.phoid_syst.value)
         return nll(data)
 
     diffable, static = evm.tree.partition(unwrap(params))
+    #print(diffable)
+    #print(static)
 
     def optx_loss_fn(diffable, args):
         return loss(diffable, *args)
@@ -164,8 +171,47 @@ if __name__ == "__main__":
     )
     fitted_params = wrap(evm.tree.combine(fitresult.value, static))
 
-    print(f"Final estimate: r = {fitted_params.mu.value}\n")
+    # Extract inverse Hessian approximation from BFGS and turn it into a covariance.
+    hessian_inv_op = fitresult.state.f_info.hessian_inv
+    if hessian_inv_op is None:
+        raise ValueError(
+            "No inverse Hessian available"
+        )
 
+    flat_opt, unravel = ravel_pytree(fitresult.value)
+    cov_matrix = jnp.asarray(hessian_inv_op.as_matrix(), dtype=flat_opt.dtype)
+
+    def param_uncertainty(selector):
+        """Propagate uncertainties from diffable space to a physical parameter."""
+
+        def value_fn(flat_params):
+            diffable_params = unravel(flat_params)
+            params = wrap(evm.tree.combine(diffable_params, static))
+            return selector(params)
+
+        grad = jax.grad(value_fn)(flat_opt)
+        variance = jnp.dot(grad, cov_matrix @ grad)
+        return jnp.sqrt(variance)
+
+    mu_sigma = param_uncertainty(lambda p: p.mu.value)
+    bkg_norm_sigma = param_uncertainty(lambda p: p.bkg_norm.value)
+    lamb_sigma = param_uncertainty(lambda p: p.lamb.value)
+    phoid_sigma = param_uncertainty(lambda p: p.phoid_syst.value)
+
+    print(
+        f"Final estimate: r = {float(fitted_params.mu.value):.6f} ± {float(mu_sigma):.6f}\n"
+    )
+    print(
+        f"Final estimate: bkg_norm = {float(fitted_params.bkg_norm.value):.6f} ± {float(bkg_norm_sigma):.6f}\n"
+    )
+    print(
+        f"Final estimate: lamb = {float(fitted_params.lamb.value):.6f} ± {float(lamb_sigma):.6f}\n"
+    )
+    print(
+        f"Final estimatee: phoid_syst = {float(fitted_params.phoid_syst.value):.6f} ± {float(phoid_sigma):.6f}\n"
+    )
+
+"""
     print("Scanning NLL vs mu...")
 
     denominator = loss(fitresult.value, static, data)
@@ -175,6 +221,9 @@ if __name__ == "__main__":
         params = eqx.tree_at(lambda p: p.mu.frozen, params, True)
 
         diffable, static = evm.tree.partition(unwrap(params))
+
+        def optx_loss_fn(diffable, args):
+            return loss(diffable, *args)
 
         fitresult = optimistix.minimise(
             optx_loss_fn,
@@ -219,3 +268,4 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_dir / "nll_scan.png")
     plt.savefig(output_dir / "nll_scan.pdf")
+"""
