@@ -6,9 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "paramore"
 version = "0.1.0"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "evermore>=0.3.2",
+    "evermore @ git+https://github.com/pfackeldey/evermore@v0.4.0",
     "numpy",
     "pandas",
     "matplotlib",

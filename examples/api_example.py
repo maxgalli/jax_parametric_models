@@ -6,11 +6,12 @@ from scipy import interpolate
 from pathlib import Path
 import jax.numpy as jnp
 import evermore as evm
-import equinox as eqx
-from typing import NamedTuple, List, Set
+from flax import nnx
 import jax
 import optax
 from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from evermore.parameters import filter as evm_filter
+from jax.experimental import checkify
 import optimistix
 from jax.tree_util import tree_leaves
 from jax.flatten_util import ravel_pytree
@@ -26,6 +27,29 @@ from paramore import (
     save_image,
 )
 from paramore.modifiers import SymmLogNormalModifier
+
+
+wrap_checked = checkify.checkify(wrap)
+
+
+class Params(nnx.Pytree):
+    def __init__(
+        self,
+        higgs_mass: evm.Parameter,
+        d_higgs_mass: evm.Parameter,
+        higgs_width: evm.Parameter,
+        lamb: evm.Parameter,
+        bkg_norm: evm.Parameter,
+        mu: evm.Parameter,
+        phoid_syst: evm.NormalParameter,
+    ) -> None:
+        self.higgs_mass = higgs_mass
+        self.d_higgs_mass = d_higgs_mass
+        self.higgs_width = higgs_width
+        self.lamb = lamb
+        self.bkg_norm = bkg_norm
+        self.mu = mu
+        self.phoid_syst = phoid_syst
 
 
 # double precision
@@ -69,45 +93,48 @@ if __name__ == "__main__":
     def signal_rate(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
 
-    class Params(eqx.Module):
-        # signal model
-        higgs_mass: evm.Parameter
-        d_higgs_mass: evm.Parameter
-        higgs_width: evm.Parameter
-        # bkg model
-        lamb: evm.Parameter
-        bkg_norm: evm.Parameter
-        # signal rate
-        mu: evm.Parameter
-        # nuisances
-        phoid_syst: evm.NormalParameter
-
     params = Params(
-        higgs_mass=evm.Parameter(
+        evm.Parameter(
             value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True
         ),
-        d_higgs_mass=evm.Parameter(
-            #0.0, name="d_higgs_mass", lower=-1.0, upper=1.0, transform=minuit_transform, frozen=True
-            0.000848571, name="d_higgs_mass", lower=-5.0, upper=5.0, transform=minuit_transform, frozen=True
+        evm.Parameter(
+            value=0.000848571,
+            name="d_higgs_mass",
+            lower=-5.0,
+            upper=5.0,
+            transform=minuit_transform,
+            frozen=True,
         ),
-        higgs_width=evm.Parameter(
-            #2.0, name="higgs_width", lower=1.0, upper=5.0, transform=minuit_transform, frozen=True
-            1.99705, name="higgs_width", lower=1.0, upper=5.0, transform=minuit_transform, frozen=True
+        evm.Parameter(
+            value=1.99705,
+            name="higgs_width",
+            lower=1.0,
+            upper=5.0,
+            transform=minuit_transform,
+            frozen=True,
         ),
-        lamb=evm.Parameter(
-            0.1, name="lamb", lower=0.0, upper=1.0, transform=minuit_transform
+        evm.Parameter(
+            value=0.1,
+            name="lamb",
+            lower=0.0,
+            upper=1.0,
+            transform=minuit_transform,
         ),
-        bkg_norm=evm.Parameter(
-            float(df_data.shape[0]),
+        evm.Parameter(
+            value=float(df_data.shape[0]),
             name="bkg_norm",
             lower=0.0,
             upper=1e6,
             transform=minuit_transform,
         ),
-        mu=evm.Parameter(
-            1.0, name="mu", lower=0.0, upper=10.0, transform=minuit_transform
+        evm.Parameter(
+            value=1.0,
+            name="mu",
+            lower=0.0,
+            upper=10.0,
+            transform=minuit_transform,
         ),
-        phoid_syst=evm.NormalParameter(
+        evm.NormalParameter(
             value=0.0, name="phoid_syst", transform=minuit_transform
         ),
     )
@@ -115,9 +142,19 @@ if __name__ == "__main__":
     def build_model(params):
         signal_pdf = EVMGaussian(
             var=mass,
-            mu=evm.Parameter(mean_function(params.higgs_mass.value, params.d_higgs_mass.value)),
+            mu=evm.Parameter(
+                value=jnp.asarray(
+                    mean_function(
+                        params.higgs_mass.value, params.d_higgs_mass.value
+                    )
+                )
+            ),
             sigma=params.higgs_width,
-            extended=evm.Parameter(signal_rate(params.mu.value, xs_ggH, br_hgg, eff, lumi))
+            extended=evm.Parameter(
+                value=jnp.asarray(
+                    signal_rate(params.mu.value, xs_ggH, br_hgg, eff, lumi)
+                )
+            ),
         )
         pho_id_modifier = SymmLogNormalModifier(
             parameter=params.phoid_syst,
@@ -135,41 +172,38 @@ if __name__ == "__main__":
         )
         return model
 
-    model = build_model(params)
-    nll = ExtendedNLL(model=model)
-    nll_val = nll(data)
-    #print(f"Initial NLL: {nll_val}")
+    params_unwrapped = unwrap(params)
+    graphdef, diffable, static = nnx.split(
+        params_unwrapped, evm_filter.is_dynamic_parameter, ...
+    )
 
-    @eqx.filter_jit
-    def loss(diffable, static, data):
-        params = wrap(evm.tree.combine(diffable, static))
-        model = build_model(params)
+    def loss_fn(dynamic_state, args):
+        graphdef, static_state, data = args
+        params_unwrapped = nnx.merge(
+            graphdef, dynamic_state, static_state, copy=True
+        )
+        _, params_wrapped = wrap_checked(params_unwrapped)
+        model = build_model(params_wrapped)
         nll = ExtendedNLL(model=model)
-        p = wrap(params)
-        #print(p.phoid_syst.value)
         return nll(data)
-
-    diffable, static = evm.tree.partition(unwrap(params))
-    #print(diffable)
-    #print(static)
-
-    def optx_loss_fn(diffable, args):
-        return loss(diffable, *args)
 
     solver = optimistix.BFGS(
         rtol=1e-5, atol=1e-7, verbose=frozenset({"step_size", "loss"})
     )
     fitresult = optimistix.minimise(
-        optx_loss_fn,
+        loss_fn,
         solver,
         diffable,
         has_aux=False,
-        args=(static, data),
+        args=(graphdef, static, data),
         options={},
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
+    fitted_unwrapped = nnx.merge(
+        graphdef, fitresult.value, static, copy=True
+    )
+    fitted_params = wrap(fitted_unwrapped)
 
     # Extract inverse Hessian approximation from BFGS and turn it into a covariance.
     hessian_inv_op = fitresult.state.f_info.hessian_inv
@@ -186,8 +220,11 @@ if __name__ == "__main__":
 
         def value_fn(flat_params):
             diffable_params = unravel(flat_params)
-            params = wrap(evm.tree.combine(diffable_params, static))
-            return selector(params)
+            params_unwrapped = nnx.merge(
+                graphdef, diffable_params, static, copy=True
+            )
+            _, params_wrapped = wrap_checked(params_unwrapped)
+            return selector(params_wrapped)
 
         grad = jax.grad(value_fn)(flat_opt)
         variance = jnp.dot(grad, cov_matrix @ grad)
@@ -213,28 +250,33 @@ if __name__ == "__main__":
 
     print("Scanning NLL vs mu...")
 
-    denominator = loss(fitresult.value, static, data)
+    denominator = loss_fn(fitresult.value, (graphdef, static, data))
 
-    def fixed_mu_fit(mu, silent=True, params=params):
-        params = eqx.tree_at(lambda p: p.mu.value, params, mu)
-        params = eqx.tree_at(lambda p: p.mu.frozen, params, True)
+    def fixed_mu_fit(mu, silent=True, params_template=params):
+        params_copy = nnx.merge(*nnx.split(params_template), copy=True)
+        params_copy.mu = params_copy.mu.replace(
+            value=jnp.asarray(mu, dtype=params_copy.mu.value.dtype)
+        )
+        params_copy.mu.set_metadata(frozen=True)
 
-        diffable, static = evm.tree.partition(unwrap(params))
+        params_unwrapped_local = unwrap(params_copy)
+        graphdef_local, diffable_local, static_local = nnx.split(
+            params_unwrapped_local, evm_filter.is_dynamic_parameter, ...
+        )
 
-        def optx_loss_fn(diffable, args):
-            return loss(diffable, *args)
-
-        fitresult = optimistix.minimise(
-            optx_loss_fn,
+        fitresult_local = optimistix.minimise(
+            loss_fn,
             solver,
-            diffable,
+            diffable_local,
             has_aux=False,
-            args=(static, data),
+            args=(graphdef_local, static_local, data),
             options={},
             max_steps=1000,
             throw=True,
         )
-        nll_val = loss(fitresult.value, static, data)
+        nll_val = loss_fn(
+            fitresult_local.value, (graphdef_local, static_local, data)
+        )
 
         if not silent:
             print(f"  mu = {mu:.3f} -> NLL = {nll_val:.3f}")

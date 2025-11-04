@@ -1,78 +1,95 @@
+from __future__ import annotations
+
+import abc
+from typing import Optional, Sequence, Set, Tuple
+
 import jax
 import jax.numpy as jnp
-from jax import jit
-from jax import lax
-from functools import partial
-import evermore as evm
-import equinox as eqx
-from quadax import romberg, quadgk
-
-import equinox as eqx
-import abc
+from flax import nnx
 from jaxtyping import Array, Float
-from typing import Optional, Set, Tuple
+from quadax import quadgk
+
+import evermore as evm
+
 from jax.tree_util import tree_leaves
 
 
-class EVMDistribution(eqx.Module):
-    var: evm.Parameter
-    extended: Optional[evm.Parameter] = None
-    modifier_parameters: Tuple[evm.Parameter, ...] = eqx.field(
-        default_factory=tuple
-    )
+class EVMDistribution(nnx.Module):
+    """Base helper around ``evermore`` parameters to describe PDFs."""
 
-    def __post_init__(self):
-        if self.extended is None:
-            object.__setattr__(
-                self,
-                "extended",
-                evm.Parameter(
-                    value=1.0,
-                    name=f"{self.var.name}_extended",
-                    lower=0.0,
-                    upper=None,
-                    frozen=False,
-                ),
+    def __init__(
+        self,
+        *,
+        var: evm.Parameter,
+        extended: Optional[evm.Parameter] = None,
+        modifier_parameters: Optional[Tuple[evm.Parameter, ...]] = None,
+    ) -> None:
+        if extended is None:
+            extended = evm.Parameter(
+                value=jnp.array(1.0, dtype=var.value.dtype),
+                name=f"{var.name}_extended",
+                lower=jnp.array(0.0, dtype=var.value.dtype),
+                upper=None,
+                frozen=False,
             )
-        elif not isinstance(self.extended, evm.Parameter):
+        if not isinstance(extended, evm.Parameter):
             raise TypeError(
-                "extended must be an evermore Parameter or None; "
-                f"got {type(self.extended)}"
+                "extended must be an evermore.Parameter or None; "
+                f"got {type(extended)}"
             )
+
+        self.var = var
+        self.extended = extended
+        self._modifier_parameters = nnx.data(tuple(modifier_parameters or ()))
+
+    @property
+    def modifier_parameters(self) -> Tuple[evm.Parameter, ...]:
+        data = getattr(self, "_modifier_parameters", ())
+        if hasattr(data, "value"):
+            return data.value  # type: ignore[return-value]
+        if isinstance(data, tuple):
+            return data
+        return tuple()
+
+    @modifier_parameters.setter
+    def modifier_parameters(self, value: Tuple[evm.Parameter, ...]) -> None:
+        self._modifier_parameters = nnx.data(tuple(value))
+
+    @property
+    def pdfs(self) -> Tuple[EVMDistribution, ...]:
+        data = getattr(self, "_pdfs", ())
+        if hasattr(data, "value"):
+            return data.value  # type: ignore[return-value]
+        if isinstance(data, tuple):
+            return data
+        return tuple()
+
+    @pdfs.setter
+    def pdfs(self, value: Sequence[EVMDistribution]) -> None:
+        self._pdfs = nnx.data(tuple(value))
 
     @abc.abstractmethod
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        """Compute the unnormalized probability density function."""
-        raise NotImplementedError("Subclasses must implement unnormalized_prob.")
+        raise NotImplementedError
 
     @abc.abstractmethod
     def sample(self, sample_shape, seed=None, **kwargs) -> Float[Array, "..."]:
-        """Sample from the distribution."""
-        raise NotImplementedError("Subclasses must implement sample.")
+        raise NotImplementedError
 
     def prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         norm = self.integrate()
-        #return self.unnormalized_prob(x) * self.extended / norm
         return self.unnormalized_prob(x) / norm
 
     def log_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         return jnp.log(self.prob(x))
 
     def integrate(self, lower=None, upper=None) -> Float[Array, "..."]:
-        """Integrate the unnormalized probability density function over the range [lower, upper]."""
-        if lower is None:
-            lower = self.var.lower
-        if upper is None:
-            upper = self.var.upper
-
-        #def _unnormalized_prob_nograd(value):
-        #    return lax.stop_gradient(self.unnormalized_prob(value))
+        lower = self.var.lower if lower is None else lower
+        upper = self.var.upper if upper is None else upper
 
         epsabs = epsrel = 1e-5
-        #integral, _ = romberg(
         integral, _ = quadgk(
             self.unnormalized_prob,
-            #_unnormalized_prob_nograd,
             [lower, upper],
             epsabs=epsabs,
             epsrel=epsrel,
@@ -85,23 +102,40 @@ class EVMDistribution(eqx.Module):
 
 class EVMGaussian(EVMDistribution):
     """Gaussian distribution with mean and standard deviation as parameters."""
-    mu: evm.Parameter = eqx.field(kw_only=True)
-    sigma: evm.Parameter = eqx.field(kw_only=True)
+
+    def __init__(
+        self,
+        *,
+        var: evm.Parameter,
+        mu: evm.Parameter,
+        sigma: evm.Parameter,
+        extended: Optional[evm.Parameter] = None,
+    ) -> None:
+        super().__init__(var=var, extended=extended)
+        self.mu = mu
+        self.sigma = sigma
 
     def unnormalized_prob(self, value):
-        return jnp.exp(
-            -0.5 * ((value - self.mu.value) / self.sigma.value) ** 2
-        )
-    
+        return jnp.exp(-0.5 * ((value - self.mu.value) / self.sigma.value) ** 2)
+
     def sample(self, sample_shape, seed=None, **kwargs):
-        # Use JAX to sample from a normal distribution
-        return jax.random.normal(
-            seed, shape=sample_shape, dtype=self.mu.value.dtype
-        ) * self.sigma.value + self.mu.value
+        return (
+            jax.random.normal(seed, shape=sample_shape, dtype=self.mu.value.dtype)
+            * self.sigma.value
+            + self.mu.value
+        )
 
 
 class EVMExponential(EVMDistribution):
-    lambd: evm.Parameter = eqx.field(kw_only=True)
+    def __init__(
+        self,
+        *,
+        var: evm.Parameter,
+        lambd: evm.Parameter,
+        extended: Optional[evm.Parameter] = None,
+    ) -> None:
+        super().__init__(var=var, extended=extended)
+        self.lambd = lambd
 
     def unnormalized_prob(self, value):
         return jnp.exp(-self.lambd.value * value)
@@ -109,64 +143,59 @@ class EVMExponential(EVMDistribution):
     def sample(self, sample_shape, seed=None, **kwargs):
         lower = self.var.lower
         upper = self.var.upper
-        """Sample from a truncated exponential between xmin and xmax."""
         u = jax.random.uniform(seed, shape=sample_shape)
         lambda_val = self.lambd.value
+        z = jnp.exp(-lambda_val * lower) - u * (
+            jnp.exp(-lambda_val * lower) - jnp.exp(-lambda_val * upper)
+        )
+        return -jnp.log(z) / lambda_val
 
-        # Compute inverse CDF of truncated exponential
-        z = jnp.exp(-lambda_val * lower) - u * (jnp.exp(-lambda_val * lower) - jnp.exp(-lambda_val * upper))
-        samples = -jnp.log(z) / lambda_val
 
-        return samples
-
-        
 class EVMSumPDF(EVMDistribution):
-    pdfs: list = eqx.field(kw_only=True)
+    def __init__(
+        self,
+        *,
+        var: evm.Parameter,
+        pdfs: Sequence[EVMDistribution],
+    ) -> None:
+        totals = jnp.stack([jnp.asarray(pdf.extended.value) for pdf in pdfs])
+        total = jnp.sum(totals, axis=0)
+        extended = evm.Parameter(
+            value=jnp.asarray(total, dtype=var.value.dtype),
+            name=f"{var.name}_sum_extended",
+            lower=jnp.array(0.0, dtype=var.value.dtype),
+            upper=None,
+            frozen=True,
+        )
+        super().__init__(var=var, extended=extended)
+        self._pdfs = nnx.data(tuple(pdfs))
 
-    def __post_init__(self):
-        super().__post_init__()
-        total_extended = jnp.asarray(0.0, dtype=jnp.asarray(self.extended.value).dtype)
         modifier_params = list(self.modifier_parameters)
         seen = list(modifier_params)
         for pdf in self.pdfs:
-            total_extended = total_extended + pdf.extended.value
             for param in pdf.modifier_parameters:
                 if all(existing is not param for existing in seen):
                     seen.append(param)
                     modifier_params.append(param)
-        object.__setattr__(
-            self,
-            "extended",
-            eqx.tree_at(
-                lambda p: p.value,
-                self.extended,
-                jnp.asarray(
-                    total_extended,
-                    dtype=jnp.asarray(self.extended.value).dtype,
-                ),
-            ),
-        )
         self.modifier_parameters = tuple(modifier_params)
 
-    # to check if correct
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        #factors = [pdf.extended / self.extended for pdf in self.pdfs]
-        #return jnp.sum(jnp.array([pdf.prob(x) * factor for pdf, factor in zip(self.pdfs, factors)]))
-        
-        #!!! Note: using this gives completely different results
-        return jnp.sum(
-            jnp.array(
-                [pdf.extended.value / self.extended.value * pdf(x) for pdf in self.pdfs]
-            ),
+        weights = jnp.stack(
+            [
+                jnp.asarray(pdf.extended.value)
+                / jnp.asarray(self.extended.value)
+                for pdf in self.pdfs
+            ],
             axis=0,
         )
-        #return sum(jnp.array([pdf.extended / self.extended * pdf(x) for pdf in self.pdfs]))
+        stacked = jnp.stack([pdf(x) for pdf in self.pdfs], axis=0)
+        reshape_dims = (weights.shape[0],) + (1,) * (stacked.ndim - 1)
+        weights = weights.reshape(reshape_dims)
+        return jnp.sum(weights * stacked, axis=0)
 
     def prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        #norm = self.integrate()
-        #return self.unnormalized_prob(x) / norm
         return self.unnormalized_prob(x)
-    
+
     def sample(self, key):
         samples = []
         for pdf in self.pdfs:
@@ -176,78 +205,21 @@ class EVMSumPDF(EVMDistribution):
             samples.append(sample)
         return jnp.concatenate(samples, axis=-1)
 
-    def _sample(self, seed, sample_shape=(), **kwargs):
-        # one key per toy
-        keys = jax.random.split(seed, sample_shape[0])
-        samples = []
-        def make_toy(key):
-        #for key in keys:
-            component_idx = jax.random.choice(
-                key,
-                len(self.pdfs),
-                (sample_shape[1],),
-                p=self.weights.reshape(-1),
-            )
-            # sample from each component
-            component_samples = []
-            for idx in range(len(self.pdfs)):
-                component_samples.append(
-                    self.pdfs[idx].sample(sample_shape=sample_shape, seed=key, **kwargs).reshape(-1)
-                )
-            # select the samples from the chosen component
-            component_samples = jnp.array(component_samples)
-            # based on component_idx, make a new array that selects the events from the chosen component
-            event_indices = jnp.arange(sample_shape[1])
-            # debug: print total, how many events per component
-            #print("How many 0s and 1s") 
-            #print(jnp.sum(component_idx == 0))
-            #print(jnp.sum(component_idx == 1))
-            #print(len(component_idx))
-            sample = component_samples[component_idx, event_indices]
-            samples.append(sample)
-            return sample
-        samples = jax.vmap(make_toy)(keys)
-        # reshape such that samples is of shape (number_of_toys, nevents)
-        #samples = jnp.array(samples)
 
-        # debug
-        #for k in keys:
-        #    samples.append(make_toy(k))
-        #samples = jnp.array(samples)
+class ExtendedNLL:
+    """Generalised negative log-likelihood for a sum of PDFs."""
 
-        return samples
-   
-
-class ExtendedNLL(eqx.Module):
-    #Generalized Extended Likelihood for a mixture of multiple PDFs.
-
-    model: EVMDistribution  # The model to compute the likelihood for
-    #nus: list  # List of event yields (expected event counts per PDF)
-
-    #def __init__(self, pdfs, nus, constraints=None):
-    #    assert len(pdfs) == len(nus), (
-    #        "Number of PDFs must match number of event yields."
-    #    )
-    #    self.pdfs = pdfs
-    #    self.nus = nus
-    #    self.constraints = constraints if constraints is not None else []
+    def __init__(self, model: EVMDistribution) -> None:
+        self.model = model
 
     def __call__(self, x):
-        N = x.shape[0]  # Number of observed events
-        #nu_total = sum(nu.value for nu in self.nus)  # Total expected events
-        nu_total = self.model.extended.value  # Total expected events from the model
+        N = x.shape[0]
+        nu_total = self.model.extended.value
+        pdf = self.model.prob(x)
 
-        # Compute mixture PDF
-        #pdf = sum(nu.value / nu_total * pdf(x) for pdf, nu in zip(self.pdfs, self.nus))
-        pdf = self.model.prob(x)  # Probability density function for the model
+        poisson_term = -nu_total + N * jnp.log(nu_total)
+        log_likelihood = poisson_term + jnp.sum(jnp.log(pdf + 1e-8))
 
-        # Extended likelihood calculation
-        poisson_term = -nu_total + N * jnp.log(nu_total)  # Log(Poisson term)
-        log_likelihood = poisson_term + jnp.sum(
-            jnp.log(pdf + 1e-8)
-        )  # Log-likelihood sum
-
-        # Add auxiliary terms from parameter priors (if present)
         def _collect_prior_logprob(node, total, seen: Set[int]):
             if isinstance(node, evm.Parameter):
                 node_id = id(node)
@@ -268,5 +240,14 @@ class ExtendedNLL(eqx.Module):
                     total = total + jnp.sum(param.prior.log_prob(param.value))
 
         log_likelihood += total
+        return jnp.squeeze(-log_likelihood)
 
-        return jnp.squeeze(-log_likelihood)  # Negative log-likelihood for minimization
+
+class GaussianConstraint:
+    def __init__(self, param, mu, sigma):
+        self.param = param
+        self.mu = mu
+        self.sigma = sigma
+
+    def __call__(self):
+        return -0.5 * ((self.param.value - self.mu) / self.sigma) ** 2

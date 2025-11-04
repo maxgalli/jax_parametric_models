@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import abc
-from typing import Callable
 
 import jax.numpy as jnp
 import evermore as evm
-import equinox as eqx
-from evermore.parameters.parameter import ValueAttr
-
 from .distributions import EVMDistribution
 
 __all__ = ["Modifier", "SymmLogNormalModifier"]
@@ -33,21 +29,14 @@ class SymmLogNormalModifier(Modifier):
         self.kappa = float(kappa)
 
     def apply(self, distribution: EVMDistribution) -> EVMDistribution:
-        modifier_value = self.kappa ** self.parameter.value
-        base_value = distribution.extended.value
+        modifier_value = jnp.exp(jnp.log(self.kappa) * self.parameter.value)
 
         modifier_params = distribution.modifier_parameters
         if all(existing is not self.parameter for existing in modifier_params):
             modifier_params = modifier_params + (self.parameter,)
 
-        distribution = eqx.tree_at(
-            lambda dist: dist.modifier_parameters,
-            distribution,
-            modifier_params,
-        )
-        distribution = eqx.tree_at(
-            lambda dist: dist.extended.raw_value,
-            distribution,
-            ValueAttr(value=base_value * modifier_value),
+        distribution.modifier_parameters = modifier_params
+        distribution.extended = distribution.extended.replace(
+            value=distribution.extended.value * modifier_value
         )
         return distribution
