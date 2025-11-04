@@ -13,7 +13,6 @@ from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 from evermore.parameters import filter as evm_filter
 from jax.experimental import checkify
 import optimistix
-from jax.tree_util import tree_leaves
 from jax.flatten_util import ravel_pytree
 
 
@@ -41,7 +40,9 @@ class Params(nnx.Pytree):
         bkg_norm: evm.Parameter,
         mu: evm.Parameter,
         phoid_syst: evm.NormalParameter,
-        jec_syst: evm.NormalParameter
+        jec_syst: evm.NormalParameter,
+        nuisance_scale: evm.Parameter,
+        nuisance_smear: evm.Parameter,
     ) -> None:
         self.higgs_mass = higgs_mass
         self.d_higgs_mass = d_higgs_mass
@@ -51,6 +52,8 @@ class Params(nnx.Pytree):
         self.mu = mu
         self.phoid_syst = phoid_syst
         self.jec_syst = jec_syst
+        self.nuisance_scale = nuisance_scale
+        self.nuisance_smear = nuisance_smear
 
 
 # double precision
@@ -90,6 +93,12 @@ if __name__ == "__main__":
 
     def mean_function(higgs_mass, d_higgs_mass):
         return higgs_mass + d_higgs_mass
+    
+    def mean_function_with_scale(higgs_mass, d_higgs_mass, nuisance_scale):
+        return (higgs_mass + d_higgs_mass) * (1.0 + 0.003 * nuisance_scale)
+
+    def sigma_function_with_smear(sigma, nuisance_smear):
+        return sigma * (1.0 + 0.045 * nuisance_smear)
 
     def signal_rate(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
@@ -140,6 +149,20 @@ if __name__ == "__main__":
         ),
         evm.NormalParameter(
             value=0.0, name="jec_syst", transform=minuit_transform
+        ),
+        evm.NormalParameter(
+            value=0.0,
+            name="nuisance_scale",
+            lower=-5.0,
+            upper=5.0,
+            transform=minuit_transform,
+        ),
+        evm.NormalParameter(
+            value=0.0,
+            name="nuisance_smear",
+            lower=-5.0,
+            upper=5.0,
+            transform=minuit_transform,
         )
     )
 
@@ -148,12 +171,18 @@ if __name__ == "__main__":
             var=mass,
             mu=evm.Parameter(
                 value=jnp.asarray(
-                    mean_function(
-                        params.higgs_mass.value, params.d_higgs_mass.value
+                    mean_function_with_scale(
+                        params.higgs_mass.value, params.d_higgs_mass.value, params.nuisance_scale.value
                     )
                 )
             ),
-            sigma=params.higgs_width,
+            sigma=evm.Parameter(
+                value=jnp.asarray(
+                    sigma_function_with_smear(
+                        params.higgs_width.value, params.nuisance_smear.value
+                    )
+                )
+            ),
             extended=evm.Parameter(
                 value=jnp.asarray(
                     signal_rate(params.mu.value, xs_ggH, br_hgg, eff, lumi)
@@ -171,6 +200,14 @@ if __name__ == "__main__":
         )
         signal_pdf = pho_id_modifier.apply(signal_pdf)
         signal_pdf = jec_modifier.apply(signal_pdf)
+
+        extra_mods = (params.nuisance_scale, params.nuisance_smear)
+        mod_params = signal_pdf.modifier_parameters
+        for extra in extra_mods:
+            if all(existing is not extra for existing in mod_params):
+                mod_params = mod_params + (extra,)
+        signal_pdf.modifier_parameters = mod_params
+
         bkg_pdf = Exponential(
             var=mass,
             lambd=params.lamb,
@@ -245,6 +282,8 @@ if __name__ == "__main__":
     lamb_sigma = param_uncertainty(lambda p: p.lamb.value)
     phoid_sigma = param_uncertainty(lambda p: p.phoid_syst.value)
     jec_sigma = param_uncertainty(lambda p: p.jec_syst.value)
+    nuisance_scale_sigma = param_uncertainty(lambda p: p.nuisance_scale.value)
+    nuisance_smear_sigma = param_uncertainty(lambda p: p.nuisance_smear.value)
 
     print(
         f"Final estimate: r = {float(fitted_params.mu.value):.6f} ± {float(mu_sigma):.6f}\n"
@@ -256,12 +295,19 @@ if __name__ == "__main__":
         f"Final estimate: lamb = {float(fitted_params.lamb.value):.6f} ± {float(lamb_sigma):.6f}\n"
     )
     print(
-        f"Final estimatee: phoid_syst = {float(fitted_params.phoid_syst.value):.6f} ± {float(phoid_sigma):.6f}\n"
+        f"Final estimate: phoid_syst = {float(fitted_params.phoid_syst.value):.6f} ± {float(phoid_sigma):.6f}\n"
     )
     print(
-        f"Final estimatee: jec_syst = {float(fitted_params.jec_syst.value):.6f} ± {float(jec_sigma):.6f}\n"
+        f"Final estimate: jec_syst = {float(fitted_params.jec_syst.value):.6f} ± {float(jec_sigma):.6f}\n"
+    )
+    print(
+        f"Final estimate: nuisance_scale = {float(fitted_params.nuisance_scale.value):.6f} ± {float(nuisance_scale_sigma):.6f}\n"
+    )
+    print(
+        f"Final estimate: nuisance_smear = {float(fitted_params.nuisance_smear.value):.6f} ± {float(nuisance_smear_sigma):.6f}\n"
     )
 
+"""
     print("Scanning NLL vs mu...")
 
     denominator = loss_fn(fitresult.value, (graphdef, static, data))
@@ -355,3 +401,4 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_dir / "nll_scan.png")
     plt.savefig(output_dir / "nll_scan.pdf")
+"""
