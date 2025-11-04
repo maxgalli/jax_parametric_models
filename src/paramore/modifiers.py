@@ -6,6 +6,7 @@ from typing import Callable
 import jax.numpy as jnp
 import evermore as evm
 import equinox as eqx
+from evermore.parameters.parameter import ValueAttr
 
 from .distributions import EVMDistribution
 
@@ -32,21 +33,21 @@ class SymmLogNormalModifier(Modifier):
         self.kappa = float(kappa)
 
     def apply(self, distribution: EVMDistribution) -> EVMDistribution:
-        #modifier = jnp.exp(jnp.log(self.kappa) * self.parameter.value)
-        modifier = self.kappa ** self.parameter.value
+        modifier_value = self.kappa ** self.parameter.value
+        base_value = distribution.extended.value
 
-        current_params = distribution.modifier_parameters
-        if all(existing is not self.parameter for existing in current_params):
-            current_params = current_params + (self.parameter,)
+        modifier_params = distribution.modifier_parameters
+        if all(existing is not self.parameter for existing in modifier_params):
+            modifier_params = modifier_params + (self.parameter,)
 
         distribution = eqx.tree_at(
             lambda dist: dist.modifier_parameters,
             distribution,
-            current_params,
+            modifier_params,
         )
-        new_extended = distribution.extended * modifier
-        return eqx.tree_at(
-            lambda dist: dist.extended,
+        distribution = eqx.tree_at(
+            lambda dist: dist.extended.raw_value,
             distribution,
-            new_extended,
+            ValueAttr(value=base_value * modifier_value),
         )
+        return distribution

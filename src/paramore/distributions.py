@@ -23,9 +23,22 @@ class EVMDistribution(eqx.Module):
 
     def __post_init__(self):
         if self.extended is None:
-            self.extended = 1
-        else:
-            self.extended = self.extended.value
+            object.__setattr__(
+                self,
+                "extended",
+                evm.Parameter(
+                    value=1.0,
+                    name=f"{self.var.name}_extended",
+                    lower=0.0,
+                    upper=None,
+                    frozen=False,
+                ),
+            )
+        elif not isinstance(self.extended, evm.Parameter):
+            raise TypeError(
+                "extended must be an evermore Parameter or None; "
+                f"got {type(self.extended)}"
+            )
 
     @abc.abstractmethod
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
@@ -111,16 +124,28 @@ class EVMSumPDF(EVMDistribution):
     pdfs: list = eqx.field(kw_only=True)
 
     def __post_init__(self):
-        total_extended = 0.0
+        super().__post_init__()
+        total_extended = jnp.asarray(0.0, dtype=jnp.asarray(self.extended.value).dtype)
         modifier_params = list(self.modifier_parameters)
         seen = list(modifier_params)
         for pdf in self.pdfs:
-            total_extended = total_extended + pdf.extended
+            total_extended = total_extended + pdf.extended.value
             for param in pdf.modifier_parameters:
                 if all(existing is not param for existing in seen):
                     seen.append(param)
                     modifier_params.append(param)
-        self.extended = total_extended
+        object.__setattr__(
+            self,
+            "extended",
+            eqx.tree_at(
+                lambda p: p.value,
+                self.extended,
+                jnp.asarray(
+                    total_extended,
+                    dtype=jnp.asarray(self.extended.value).dtype,
+                ),
+            ),
+        )
         self.modifier_parameters = tuple(modifier_params)
 
     # to check if correct
@@ -129,7 +154,12 @@ class EVMSumPDF(EVMDistribution):
         #return jnp.sum(jnp.array([pdf.prob(x) * factor for pdf, factor in zip(self.pdfs, factors)]))
         
         #!!! Note: using this gives completely different results
-        return jnp.sum(jnp.array([pdf.extended / self.extended * pdf(x) for pdf in self.pdfs]), axis=0)
+        return jnp.sum(
+            jnp.array(
+                [pdf.extended.value / self.extended.value * pdf(x) for pdf in self.pdfs]
+            ),
+            axis=0,
+        )
         #return sum(jnp.array([pdf.extended / self.extended * pdf(x) for pdf in self.pdfs]))
 
     def prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
@@ -140,7 +170,7 @@ class EVMSumPDF(EVMDistribution):
     def sample(self, key):
         samples = []
         for pdf in self.pdfs:
-            n2 = jax.random.poisson(lam=pdf.extended, key=key, shape=())
+            n2 = jax.random.poisson(lam=pdf.extended.value, key=key, shape=())
             n2 = jnp.asarray(n2, dtype=jnp.int64)
             sample = pdf.sample(sample_shape=(n2,), seed=key)
             samples.append(sample)
@@ -205,7 +235,7 @@ class ExtendedNLL(eqx.Module):
     def __call__(self, x):
         N = x.shape[0]  # Number of observed events
         #nu_total = sum(nu.value for nu in self.nus)  # Total expected events
-        nu_total = self.model.extended  # Total expected events from the model
+        nu_total = self.model.extended.value  # Total expected events from the model
 
         # Compute mixture PDF
         #pdf = sum(nu.value / nu_total * pdf(x) for pdf, nu in zip(self.pdfs, self.nus))
@@ -240,13 +270,3 @@ class ExtendedNLL(eqx.Module):
         log_likelihood += total
 
         return jnp.squeeze(-log_likelihood)  # Negative log-likelihood for minimization
-
-
-class GaussianConstraint:
-    def __init__(self, param, mu, sigma):
-        self.param = param
-        self.mu = mu
-        self.sigma = sigma
-
-    def __call__(self):
-        return -0.5 * ((self.param.value - self.mu) / self.sigma) ** 2
