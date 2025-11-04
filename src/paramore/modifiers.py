@@ -4,7 +4,7 @@ import abc
 
 import jax.numpy as jnp
 import evermore as evm
-from .distributions import EVMDistribution
+from .distributions import Distribution
 
 __all__ = ["Modifier", "SymmLogNormalModifier"]
 
@@ -16,7 +16,7 @@ class Modifier(abc.ABC):
         self.parameter = parameter
 
     @abc.abstractmethod
-    def apply(self, distribution: EVMDistribution) -> EVMDistribution:
+    def apply(self, distribution: Distribution) -> Distribution:
         """Return a modified copy of the distribution."""
         raise NotImplementedError
 
@@ -28,7 +28,7 @@ class SymmLogNormalModifier(Modifier):
         super().__init__(parameter)
         self.kappa = float(kappa)
 
-    def apply(self, distribution: EVMDistribution) -> EVMDistribution:
+    def apply(self, distribution: Distribution) -> Distribution:
         modifier_value = jnp.exp(jnp.log(self.kappa) * self.parameter.value)
 
         modifier_params = distribution.modifier_parameters

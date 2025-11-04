@@ -14,9 +14,9 @@ from scipy import interpolate
 import optimistix
 
 from paramore import (
-    EVMExponential,
-    EVMGaussian,
-    EVMSumPDF,
+    Exponential,
+    Gaussian,
+    SumPDF,
     ExtendedNLL,
     plot_as_data,
     save_image,
@@ -92,7 +92,7 @@ if __name__ == "__main__":
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
-        model = EVMGaussian(mass, mu=composed_mu, sigma=std)
+        model = Gaussian(mass, mu=composed_mu, sigma=std)
         nll = NLL(model, data)
         return nll()
 
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     @eqx.filter_jit
     def loss_fn_bkg(diffable, static, data):
         params = wrap(evm.tree.combine(diffable, static))
-        model = EVMExponential(mass, lambd=params.lambd)
+        model = Exponential(mass, lambd=params.lambd)
         nll = NLL(model, data)
         return nll()
 
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     fig, ax = plt.subplots()
     ax.set_xlabel("$m_{\gamma\gamma}$ [GeV]")
     x = np.linspace(100, 180, 1000)
-    model_bkg = EVMExponential(mass, lambd=fitted_params.lambd)
+    model_bkg = Exponential(mass, lambd=fitted_params.lambd)
     y = model_bkg(x)
     ax.plot(x, y, label="fit")
     ax.legend()
@@ -267,16 +267,16 @@ if __name__ == "__main__":
             ),
             name="signal_rate",
         )
-        model_bkg = EVMExponential(
+        model_bkg = Exponential(
             var=mass, lambd=params.lambd, extended=params.model_bkg_norm
         )
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
-        model_ggH = EVMGaussian(
+        model_ggH = Gaussian(
             var=mass, mu=composed_mu, sigma=params.sigma, extended=signal_rate
         )
-        model = EVMSumPDF(var=mass, pdfs=[model_ggH, model_bkg])
+        model = SumPDF(var=mass, pdfs=[model_ggH, model_bkg])
         nll = ExtendedNLL(model=model)
         # nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
         return nll(data)

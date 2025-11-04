@@ -36,7 +36,7 @@ python examples/part1_2.py
 Key functionality is exposed via `paramore`, for example:
 
 ```python
-from paramore import EVMGaussian, plot_as_data
+from paramore import Gaussian, plot_as_data
 ```
 
 Example datasets live alongside the scripts in `examples/samples`:

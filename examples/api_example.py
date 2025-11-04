@@ -18,11 +18,10 @@ from jax.flatten_util import ravel_pytree
 
 
 from paramore import (
-    EVMExponential,
-    EVMGaussian,
+    Exponential,
+    Gaussian,
     ExtendedNLL,
-    GaussianConstraint,
-    EVMSumPDF,
+    SumPDF,
     plot_as_data,
     save_image,
 )
@@ -140,7 +139,7 @@ if __name__ == "__main__":
     )
 
     def build_model(params):
-        signal_pdf = EVMGaussian(
+        signal_pdf = Gaussian(
             var=mass,
             mu=evm.Parameter(
                 value=jnp.asarray(
@@ -161,12 +160,12 @@ if __name__ == "__main__":
             kappa=1.05,
         )
         signal_pdf = pho_id_modifier.apply(signal_pdf)
-        bkg_pdf = EVMExponential(
+        bkg_pdf = Exponential(
             var=mass,
             lambd=params.lamb,
             extended=params.bkg_norm,
         )
-        model = EVMSumPDF(
+        model = SumPDF(
             var=mass,
             pdfs=[signal_pdf, bkg_pdf],
         )

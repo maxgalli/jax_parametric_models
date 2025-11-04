@@ -1,22 +1,20 @@
 """Paramore package."""
 
 from .distributions import (
-    EVMDistribution,
-    EVMGaussian,
-    EVMExponential,
-    EVMSumPDF,
+    Distribution,
+    Gaussian,
+    Exponential,
+    SumPDF,
     ExtendedNLL,
-    GaussianConstraint,
 )
 from .utils import plot_as_data, save_image
 
 __all__ = [
-    "EVMDistribution",
-    "EVMGaussian",
-    "EVMExponential",
-    "EVMSumPDF",
+    "Distribution",
+    "Gaussian",
+    "Exponential",
+    "SumPDF",
     "ExtendedNLL",
-    "GaussianConstraint",
     "plot_as_data",
     "save_image",
 ]

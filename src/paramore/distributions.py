@@ -14,7 +14,7 @@ import evermore as evm
 from jax.tree_util import tree_leaves
 
 
-class EVMDistribution(nnx.Module):
+class Distribution(nnx.Module):
     """Base helper around ``evermore`` parameters to describe PDFs."""
 
     def __init__(
@@ -56,7 +56,7 @@ class EVMDistribution(nnx.Module):
         self._modifier_parameters = nnx.data(tuple(value))
 
     @property
-    def pdfs(self) -> Tuple[EVMDistribution, ...]:
+    def pdfs(self) -> Tuple[Distribution, ...]:
         data = getattr(self, "_pdfs", ())
         if hasattr(data, "value"):
             return data.value  # type: ignore[return-value]
@@ -65,7 +65,7 @@ class EVMDistribution(nnx.Module):
         return tuple()
 
     @pdfs.setter
-    def pdfs(self, value: Sequence[EVMDistribution]) -> None:
+    def pdfs(self, value: Sequence[Distribution]) -> None:
         self._pdfs = nnx.data(tuple(value))
 
     @abc.abstractmethod
@@ -100,7 +100,7 @@ class EVMDistribution(nnx.Module):
         return self.prob(x)
 
 
-class EVMGaussian(EVMDistribution):
+class Gaussian(Distribution):
     """Gaussian distribution with mean and standard deviation as parameters."""
 
     def __init__(
@@ -126,7 +126,7 @@ class EVMGaussian(EVMDistribution):
         )
 
 
-class EVMExponential(EVMDistribution):
+class Exponential(Distribution):
     def __init__(
         self,
         *,
@@ -151,12 +151,12 @@ class EVMExponential(EVMDistribution):
         return -jnp.log(z) / lambda_val
 
 
-class EVMSumPDF(EVMDistribution):
+class SumPDF(Distribution):
     def __init__(
         self,
         *,
         var: evm.Parameter,
-        pdfs: Sequence[EVMDistribution],
+        pdfs: Sequence[Distribution],
     ) -> None:
         totals = jnp.stack([jnp.asarray(pdf.extended.value) for pdf in pdfs])
         total = jnp.sum(totals, axis=0)
@@ -209,7 +209,7 @@ class EVMSumPDF(EVMDistribution):
 class ExtendedNLL:
     """Generalised negative log-likelihood for a sum of PDFs."""
 
-    def __init__(self, model: EVMDistribution) -> None:
+    def __init__(self, model: Distribution) -> None:
         self.model = model
 
     def __call__(self, x):
@@ -242,12 +242,3 @@ class ExtendedNLL:
         log_likelihood += total
         return jnp.squeeze(-log_likelihood)
 
-
-class GaussianConstraint:
-    def __init__(self, param, mu, sigma):
-        self.param = param
-        self.mu = mu
-        self.sigma = sigma
-
-    def __call__(self):
-        return -0.5 * ((self.param.value - self.mu) / self.sigma) ** 2

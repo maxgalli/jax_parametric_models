@@ -14,9 +14,9 @@ from copy import deepcopy
 from dask.distributed import Client
 
 from paramore import (
-    EVMExponential,
-    EVMGaussian,
-    EVMSumPDF,
+    Exponential,
+    Gaussian,
+    SumPDF,
     ExtendedNLL,
     plot_as_data,
     save_image,
@@ -95,7 +95,7 @@ def main():
     print(signal_rate.value)
 
     # signal
-    gauss = EVMGaussian(var=mass, mu=composed_mu, sigma=sigma, extended=signal_rate)
+    gauss = Gaussian(var=mass, mu=composed_mu, sigma=sigma, extended=signal_rate)
 
 
     # background
@@ -114,10 +114,10 @@ def main():
         transform=minuit_transform,
     )
     print(norm_bkg.value)
-    bkg = EVMExponential(var=mass,lambd=lam, extended=norm_bkg)
+    bkg = Exponential(var=mass,lambd=lam, extended=norm_bkg)
 
     # full model
-    model = EVMSumPDF(
+    model = SumPDF(
         var=mass,
         pdfs=[gauss, bkg],
     )
@@ -198,12 +198,12 @@ def main():
             ),
             name="signal_rate",
         )
-        model_bkg = EVMExponential(var=mass,lambd=params.lambd, extended=params.model_bkg_norm)
+        model_bkg = Exponential(var=mass,lambd=params.lambd, extended=params.model_bkg_norm)
         composed_mu = evm.Parameter(
             mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
         )
-        model_ggH = EVMGaussian(var=mass,mu=composed_mu, sigma=params.sigma, extended=signal_rate)
-        model= EVMSumPDF(var=mass, pdfs=[model_bkg, model_ggH])
+        model_ggH = Gaussian(var=mass,mu=composed_mu, sigma=params.sigma, extended=signal_rate)
+        model= SumPDF(var=mass, pdfs=[model_bkg, model_ggH])
         #nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
         nll = ExtendedNLL(model)
         return nll(data)

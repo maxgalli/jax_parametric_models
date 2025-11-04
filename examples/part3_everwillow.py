@@ -15,11 +15,10 @@ import optimistix
 
 
 from paramore import (
-    EVMExponential,
-    EVMGaussian,
+    Exponential,
+    Gaussian,
     ExtendedNLL,
-    GaussianConstraint,
-    EVMSumPDF,
+    SumPDF,
     plot_as_data,
     save_image,
 )
@@ -112,7 +111,7 @@ if __name__ == "__main__":
             "only_channel": {
                 "processes": {
                     "signal": {
-                        "pdf": EVMGaussian(
+                        "pdf": Gaussian(
                             var=mass,
                             mu=evm.Parameter(
                                 mean_function(
@@ -141,7 +140,7 @@ if __name__ == "__main__":
                         ],
                     },
                     "background": {
-                        "pdf": EVMExponential(
+                        "pdf": Exponential(
                             var=mass,
                             lambd=params.lamb,
                             extended=params.bkg_norm,
@@ -174,7 +173,7 @@ if __name__ == "__main__":
                         print(pdf.extended)
                     constraints.append(evm.loss.get_log_probs(nuisance_name["parameter"]))
                 pdfs.append(pdf)
-            total_pdf = EVMSumPDF(var=mass, pdfs=pdfs)
+            total_pdf = SumPDF(var=mass, pdfs=pdfs)
             nll = ExtendedNLL(model=total_pdf)
             nll_value = nll(data)
             if constraints:
