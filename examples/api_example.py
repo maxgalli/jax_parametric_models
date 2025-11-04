@@ -25,7 +25,7 @@ from paramore import (
     plot_as_data,
     save_image,
 )
-from paramore.modifiers import SymmLogNormalModifier
+from paramore.modifiers import SymmLogNormalModifier, AsymmetricLogNormalModifier
 
 
 wrap_checked = checkify.checkify(wrap)
@@ -41,6 +41,7 @@ class Params(nnx.Pytree):
         bkg_norm: evm.Parameter,
         mu: evm.Parameter,
         phoid_syst: evm.NormalParameter,
+        jec_syst: evm.NormalParameter
     ) -> None:
         self.higgs_mass = higgs_mass
         self.d_higgs_mass = d_higgs_mass
@@ -49,6 +50,7 @@ class Params(nnx.Pytree):
         self.bkg_norm = bkg_norm
         self.mu = mu
         self.phoid_syst = phoid_syst
+        self.jec_syst = jec_syst
 
 
 # double precision
@@ -136,6 +138,9 @@ if __name__ == "__main__":
         evm.NormalParameter(
             value=0.0, name="phoid_syst", transform=minuit_transform
         ),
+        evm.NormalParameter(
+            value=0.0, name="jec_syst", transform=minuit_transform
+        )
     )
 
     def build_model(params):
@@ -159,7 +164,13 @@ if __name__ == "__main__":
             parameter=params.phoid_syst,
             kappa=1.05,
         )
+        jec_modifier = AsymmetricLogNormalModifier(
+            parameter=params.jec_syst,
+            kappa_up=1.056,
+            kappa_down=0.951,
+        )
         signal_pdf = pho_id_modifier.apply(signal_pdf)
+        signal_pdf = jec_modifier.apply(signal_pdf)
         bkg_pdf = Exponential(
             var=mass,
             lambd=params.lamb,
@@ -233,6 +244,7 @@ if __name__ == "__main__":
     bkg_norm_sigma = param_uncertainty(lambda p: p.bkg_norm.value)
     lamb_sigma = param_uncertainty(lambda p: p.lamb.value)
     phoid_sigma = param_uncertainty(lambda p: p.phoid_syst.value)
+    jec_sigma = param_uncertainty(lambda p: p.jec_syst.value)
 
     print(
         f"Final estimate: r = {float(fitted_params.mu.value):.6f} ± {float(mu_sigma):.6f}\n"
@@ -245,6 +257,9 @@ if __name__ == "__main__":
     )
     print(
         f"Final estimatee: phoid_syst = {float(fitted_params.phoid_syst.value):.6f} ± {float(phoid_sigma):.6f}\n"
+    )
+    print(
+        f"Final estimatee: jec_syst = {float(fitted_params.jec_syst.value):.6f} ± {float(jec_sigma):.6f}\n"
     )
 
     print("Scanning NLL vs mu...")
