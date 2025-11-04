@@ -211,7 +211,6 @@ if __name__ == "__main__":
         f"Final estimatee: phoid_syst = {float(fitted_params.phoid_syst.value):.6f} ± {float(phoid_sigma):.6f}\n"
     )
 
-"""
     print("Scanning NLL vs mu...")
 
     denominator = loss(fitresult.value, static, data)
@@ -256,16 +255,47 @@ if __name__ == "__main__":
     n_interp = 1000
     x_interp = jnp.linspace(x[0], x[-1], n_interp)
     y_interp = func(x_interp)
-    y_interp = y_interp - jnp.min(y_interp)
+    min_idx = int(jnp.argmin(y_interp))
+    mu_hat = float(x_interp[min_idx])
+    y_min = float(y_interp[min_idx])
+    y_interp = y_interp - y_min
+
+    def _find_crossings(target):
+        diffs = y_interp - target
+        sign_changes = jnp.where(jnp.diff(jnp.sign(diffs)))[0]
+        if sign_changes.size == 0:
+            return []
+        roots = []
+        for idx in sign_changes:
+            x0, x1 = x_interp[idx], x_interp[idx + 1]
+            y0, y1 = diffs[idx], diffs[idx + 1]
+            roots.append(float(x0 - y0 * (x1 - x0) / (y1 - y0)))
+        return roots
+
+    crossings = _find_crossings(1.0)
+    if len(crossings) >= 2:
+        left_cross, right_cross = min(crossings), max(crossings)
+        sigma_mu = 0.5 * (right_cross - left_cross)
+    else:
+        sigma_mu = None
+
     fig, ax = plt.subplots()
     ax.plot(x_interp, y_interp, label="NLL Scan", color="black")
-    ax.set_xlabel(r"Signal strength $\mu$")
-    ax.set_ylabel(r"-2$\Delta$NLL")
-    ax.axhline(1.0, color="red", linestyle="--", label=r"$1\sigma$ interval")
-    ax.set_ylim(-1.0, 10)
+    ax.set_xlabel("Signal strength $\\mu$")
+    ax.set_ylabel("-2$\\Delta$NLL")
+    ax.axhline(1.0, color="red", linestyle="--", label="$1\\sigma$ interval")
+    ax.set_ylim(0., 10.)
+    if sigma_mu is not None:
+        ax.annotate(
+            fr"$\hat{{\mu}} = {mu_hat:.3f}\pm{sigma_mu:.3f}$",
+            xy=(mu_hat, 0.05),
+            xycoords=("data", "axes fraction"),
+            xytext=(10, 10),
+            textcoords="offset points",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+        )
     ax.legend()
     output_dir = base_dir / "figures_api_example"
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_dir / "nll_scan.png")
     plt.savefig(output_dir / "nll_scan.pdf")
-"""

@@ -10,27 +10,22 @@ from quadax import romberg, quadgk
 import equinox as eqx
 import abc
 from jaxtyping import Array, Float
-from typing import Optional, Set
+from typing import Optional, Set, Tuple
 from jax.tree_util import tree_leaves
 
 
 class EVMDistribution(eqx.Module):
     var: evm.Parameter
     extended: Optional[evm.Parameter] = None
+    modifier_parameters: Tuple[evm.Parameter, ...] = eqx.field(
+        default_factory=tuple
+    )
 
     def __post_init__(self):
         if self.extended is None:
             self.extended = 1
         else:
             self.extended = self.extended.value
-
-    #def __post_init__(self):
-    #    self.lower_bound = self.var.lower[0]
-    #    self.upper_bound = self.var.upper[0]
-    #    if self.extended is None:
-    #        self.extended = 1
-    #    else:
-    #        self.extended = self.extended.value
 
     @abc.abstractmethod
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
@@ -80,13 +75,6 @@ class EVMGaussian(EVMDistribution):
     mu: evm.Parameter = eqx.field(kw_only=True)
     sigma: evm.Parameter = eqx.field(kw_only=True)
 
-    #def __init__(self, var: evm.Parameter, mu: Float[Array, ""], sigma: Float[Array, ""]):
-    #    object.__setattr__(self, "var", var)
-    #    object.__setattr__(self, "mu", mu)
-    #    object.__setattr__(self, "sigma", sigma)
-    #    object.__setattr__(self, "lower_bound", var.lower[0])
-    #    object.__setattr__(self, "upper_bound", var.upper[0])
-
     def unnormalized_prob(self, value):
         return jnp.exp(
             -0.5 * ((value - self.mu.value) / self.sigma.value) ** 2
@@ -123,7 +111,17 @@ class EVMSumPDF(EVMDistribution):
     pdfs: list = eqx.field(kw_only=True)
 
     def __post_init__(self):
-        self.extended = sum([pdf.extended for pdf in self.pdfs])
+        total_extended = 0.0
+        modifier_params = list(self.modifier_parameters)
+        seen = list(modifier_params)
+        for pdf in self.pdfs:
+            total_extended = total_extended + pdf.extended
+            for param in pdf.modifier_parameters:
+                if all(existing is not param for existing in seen):
+                    seen.append(param)
+                    modifier_params.append(param)
+        self.extended = total_extended
+        self.modifier_parameters = tuple(modifier_params)
 
     # to check if correct
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
@@ -189,64 +187,6 @@ class EVMSumPDF(EVMDistribution):
 
         return samples
    
-    
-
-
-"""
-class EVMMixture(EVMDistribution):
-    def __init__(self, components, weights):
-        # assert that var is the same for all components
-        # can be done with var.name
-        super.__init__(components[0].var)
-        self.components = components
-        self.weights = jnp.array([p.value for p in weights]) / jnp.sum(jnp.array([p.value for p in weights]))
-
-    def _unnormalized_prob(self, x):
-        # Compute the unnormalized probability density function
-        return sum(w * comp._unnormalized_prob(x) for comp, w in zip(self.components, self.weights))
-
-    def sample(self, seed, sample_shape=(), **kwargs):
-        # one key per toy
-        keys = jax.random.split(seed, sample_shape[0])
-        samples = []
-        def make_toy(key):
-        #for key in keys:
-            component_idx = jax.random.choice(
-                key,
-                len(self.components),
-                (sample_shape[1],),
-                p=self.weights.reshape(-1),
-            )
-            # sample from each component
-            component_samples = []
-            for idx in range(len(self.components)):
-                component_samples.append(
-                    self.components[idx].sample(sample_shape=sample_shape, seed=key, **kwargs).reshape(-1)
-                )
-            # select the samples from the chosen component
-            component_samples = jnp.array(component_samples)
-            # based on component_idx, make a new array that selects the events from the chosen component
-            event_indices = jnp.arange(sample_shape[1])
-            # debug: print total, how many events per component
-            #print("How many 0s and 1s") 
-            #print(jnp.sum(component_idx == 0))
-            #print(jnp.sum(component_idx == 1))
-            #print(len(component_idx))
-            sample = component_samples[component_idx, event_indices]
-            samples.append(sample)
-            return sample
-        samples = jax.vmap(make_toy)(keys)
-        # reshape such that samples is of shape (number_of_toys, nevents)
-        #samples = jnp.array(samples)
-
-        # debug
-        #for k in keys:
-        #    samples.append(make_toy(k))
-        #samples = jnp.array(samples)
-
-        return samples
-"""
-
 
 class ExtendedNLL(eqx.Module):
     #Generalized Extended Likelihood for a mixture of multiple PDFs.
@@ -292,45 +232,14 @@ class ExtendedNLL(eqx.Module):
         for leaf in tree_leaves(self.model):
             total, seen = _collect_prior_logprob(leaf, total, seen)
 
+        if hasattr(self.model, "modifier_parameters"):
+            for param in self.model.modifier_parameters:
+                if param is not None and getattr(param, "prior", None) is not None:
+                    total = total + jnp.sum(param.prior.log_prob(param.value))
+
         log_likelihood += total
 
         return jnp.squeeze(-log_likelihood)  # Negative log-likelihood for minimization
-
-"""
-class ExtendedNLL(eqx.Module):
-    #Generalized Extended Likelihood for a mixture of multiple PDFs.
-
-    pdfs: list
-    nus: list  # List of event yields (expected event counts per PDF)
-    constraints: list
-
-    def __init__(self, pdfs, nus, constraints=None):
-        assert len(pdfs) == len(nus), (
-            "Number of PDFs must match number of event yields."
-        )
-        self.pdfs = pdfs
-        self.nus = nus
-        self.constraints = constraints if constraints is not None else []
-
-    def __call__(self, x):
-        N = x.shape[0]  # Number of observed events
-        nu_total = sum(nu.value for nu in self.nus)  # Total expected events
-
-        # Compute mixture PDF
-        pdf = sum(nu.value / nu_total * pdf(x) for pdf, nu in zip(self.pdfs, self.nus))
-
-        # Extended likelihood calculation
-        poisson_term = -nu_total + N * jnp.log(nu_total)  # Log(Poisson term)
-        log_likelihood = poisson_term + jnp.sum(
-            jnp.log(pdf + 1e-8)
-        )  # Log-likelihood sum
-
-        # add constraints
-        constraint_term = sum(c() for c in self.constraints)
-        log_likelihood += constraint_term
-
-        return jnp.squeeze(-log_likelihood)  # Negative log-likelihood for minimization
-"""
 
 
 class GaussianConstraint:

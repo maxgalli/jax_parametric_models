@@ -32,10 +32,21 @@ class SymmLogNormalModifier(Modifier):
         self.kappa = float(kappa)
 
     def apply(self, distribution: EVMDistribution) -> EVMDistribution:
-        modifier = self.kappa ** self.parameter.value
         #modifier = jnp.exp(jnp.log(self.kappa) * self.parameter.value)
+        modifier = self.kappa ** self.parameter.value
+
+        current_params = distribution.modifier_parameters
+        if all(existing is not self.parameter for existing in current_params):
+            current_params = current_params + (self.parameter,)
+
+        distribution = eqx.tree_at(
+            lambda dist: dist.modifier_parameters,
+            distribution,
+            current_params,
+        )
+        new_extended = distribution.extended * modifier
         return eqx.tree_at(
             lambda dist: dist.extended,
             distribution,
-            distribution.extended * modifier,
+            new_extended,
         )
