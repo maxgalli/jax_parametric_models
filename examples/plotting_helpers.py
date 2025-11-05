@@ -1,8 +1,7 @@
-from dataclasses import dataclass
+"""Helper functions for plotting in examples."""
 import numpy as np
 import matplotlib.pyplot as plt
 import mplhep as hep
-import matplotlib.colors as colors
 
 hep.style.use("CMS")
 

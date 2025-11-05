@@ -16,16 +16,15 @@ import optimistix
 from jax.flatten_util import ravel_pytree
 
 
-from paramore import (
+from paramore.distributions import (
     Exponential,
     Gaussian,
     ExtendedNLL,
     SumPDF,
     ParameterizedFunction,
-    plot_as_data,
-    save_image,
 )
 from paramore.modifiers import SymmLogNormalModifier, AsymmetricLogNormalModifier
+from plotting_helpers import plot_as_data, save_image
 
 
 wrap_checked = checkify.checkify(wrap)
