@@ -11,10 +11,22 @@ from quadax import quadgk
 
 import evermore as evm
 
-from jax.tree_util import tree_leaves
+
+class ParameterizedFunction(nnx.Pytree):
+    """Base class for functions that depend on evermore Parameters.
+
+    Subclasses should store evm.Parameter objects as attributes and implement
+    a .value property that returns the computed result as a jnp.array.
+    """
+
+    @property
+    @abc.abstractmethod
+    def value(self) -> Float[Array, "..."]:
+        """Compute and return the function value."""
+        raise NotImplementedError
 
 
-class Distribution(nnx.Module):
+class Distribution(nnx.Pytree):
     """Base helper around ``evermore`` parameters to describe PDFs."""
 
     def __init__(
@@ -22,7 +34,6 @@ class Distribution(nnx.Module):
         *,
         var: evm.Parameter,
         extended: Optional[evm.Parameter] = None,
-        modifier_parameters: Optional[Tuple[evm.Parameter, ...]] = None,
     ) -> None:
         if extended is None:
             extended = evm.Parameter(
@@ -32,41 +43,14 @@ class Distribution(nnx.Module):
                 upper=None,
                 frozen=False,
             )
-        if not isinstance(extended, evm.Parameter):
+        if not isinstance(extended, (evm.Parameter, ParameterizedFunction)):
             raise TypeError(
-                "extended must be an evermore.Parameter or None; "
+                "extended must be an evermore.Parameter, ParameterizedFunction, or None; "
                 f"got {type(extended)}"
             )
 
         self.var = var
         self.extended = extended
-        self._modifier_parameters = nnx.data(tuple(modifier_parameters or ()))
-
-    @property
-    def modifier_parameters(self) -> Tuple[evm.Parameter, ...]:
-        data = getattr(self, "_modifier_parameters", ())
-        if hasattr(data, "value"):
-            return data.value  # type: ignore[return-value]
-        if isinstance(data, tuple):
-            return data
-        return tuple()
-
-    @modifier_parameters.setter
-    def modifier_parameters(self, value: Tuple[evm.Parameter, ...]) -> None:
-        self._modifier_parameters = nnx.data(tuple(value))
-
-    @property
-    def pdfs(self) -> Tuple[Distribution, ...]:
-        data = getattr(self, "_pdfs", ())
-        if hasattr(data, "value"):
-            return data.value  # type: ignore[return-value]
-        if isinstance(data, tuple):
-            return data
-        return tuple()
-
-    @pdfs.setter
-    def pdfs(self, value: Sequence[Distribution]) -> None:
-        self._pdfs = nnx.data(tuple(value))
 
     @abc.abstractmethod
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
@@ -151,6 +135,25 @@ class Exponential(Distribution):
         return -jnp.log(z) / lambda_val
 
 
+class SumExtended(ParameterizedFunction):
+    """Compute the sum of extended values from multiple PDFs."""
+
+    def __init__(self, pdfs: Tuple[Distribution, ...]):
+        self._pdfs = nnx.data(pdfs)
+
+    @property
+    def pdfs(self) -> Tuple[Distribution, ...]:
+        data = self._pdfs
+        if hasattr(data, "value"):
+            return data.value  # type: ignore[return-value]
+        return data
+
+    @property
+    def value(self):
+        totals = jnp.stack([jnp.asarray(pdf.extended.value) for pdf in self.pdfs])
+        return jnp.sum(totals, axis=0)
+
+
 class SumPDF(Distribution):
     def __init__(
         self,
@@ -158,26 +161,17 @@ class SumPDF(Distribution):
         var: evm.Parameter,
         pdfs: Sequence[Distribution],
     ) -> None:
-        totals = jnp.stack([jnp.asarray(pdf.extended.value) for pdf in pdfs])
-        total = jnp.sum(totals, axis=0)
-        extended = evm.Parameter(
-            value=jnp.asarray(total, dtype=var.value.dtype),
-            name=f"{var.name}_sum_extended",
-            lower=jnp.array(0.0, dtype=var.value.dtype),
-            upper=None,
-            frozen=True,
-        )
+        pdfs_tuple = tuple(pdfs)
+        extended = SumExtended(pdfs_tuple)
         super().__init__(var=var, extended=extended)
-        self._pdfs = nnx.data(tuple(pdfs))
+        self._pdfs = nnx.data(pdfs_tuple)
 
-        modifier_params = list(self.modifier_parameters)
-        seen = list(modifier_params)
-        for pdf in self.pdfs:
-            for param in pdf.modifier_parameters:
-                if all(existing is not param for existing in seen):
-                    seen.append(param)
-                    modifier_params.append(param)
-        self.modifier_parameters = tuple(modifier_params)
+    @property
+    def pdfs(self) -> Tuple[Distribution, ...]:
+        data = self._pdfs
+        if hasattr(data, "value"):
+            return data.value  # type: ignore[return-value]
+        return data
 
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         weights = jnp.stack(
@@ -211,6 +205,39 @@ class ExtendedNLL:
 
     def __init__(self, model: Distribution) -> None:
         self.model = model
+        # Collect all parameters with priors at initialization (before JIT)
+        self._params_with_priors = self._collect_parameters_with_priors(model)
+
+    def _collect_parameters_with_priors(self, node, found=None):
+        """Recursively collect all parameters that have priors."""
+        if found is None:
+            found = []
+
+        if isinstance(node, evm.Parameter):
+            if getattr(node, "prior", None) is not None:
+                # Check if not already in list (by identity)
+                if all(p is not node for p in found):
+                    found.append(node)
+        else:
+            # Traverse any object that might contain parameters
+            for attr_name in dir(node):
+                if attr_name.startswith('_') or attr_name in ('mro', 'value'):
+                    continue
+                try:
+                    attr = getattr(node, attr_name)
+                    # Check for evm.Parameter first, even if callable
+                    if isinstance(attr, evm.Parameter):
+                        self._collect_parameters_with_priors(attr, found)
+                    elif not callable(attr) and (hasattr(attr, '__dict__') or isinstance(attr, (tuple, list))):
+                        # Traverse objects that might contain parameters
+                        if isinstance(attr, (tuple, list)):
+                            for item in attr:
+                                self._collect_parameters_with_priors(item, found)
+                        elif not isinstance(attr, (str, int, float, bool, type(None))):
+                            self._collect_parameters_with_priors(attr, found)
+                except Exception:
+                    pass
+        return found
 
     def __call__(self, x):
         N = x.shape[0]
@@ -220,25 +247,12 @@ class ExtendedNLL:
         poisson_term = -nu_total + N * jnp.log(nu_total)
         log_likelihood = poisson_term + jnp.sum(jnp.log(pdf + 1e-8))
 
-        def _collect_prior_logprob(node, total, seen: Set[int]):
-            if isinstance(node, evm.Parameter):
-                node_id = id(node)
-                if node_id not in seen and getattr(node, "prior", None) is not None:
-                    seen.add(node_id)
-                    prior_val = node.prior.log_prob(node.value)
-                    total = total + jnp.sum(prior_val)
-            return total, seen
+        # Add priors for all parameters collected at initialization
+        prior_total = jnp.array(0.0)
+        for param in self._params_with_priors:
+            prior_val = param.prior.log_prob(param.value)
+            prior_total = prior_total + jnp.sum(prior_val)
 
-        total = jnp.array(0.0)
-        seen: Set[int] = set()
-        for leaf in tree_leaves(self.model):
-            total, seen = _collect_prior_logprob(leaf, total, seen)
-
-        if hasattr(self.model, "modifier_parameters"):
-            for param in self.model.modifier_parameters:
-                if param is not None and getattr(param, "prior", None) is not None:
-                    total = total + jnp.sum(param.prior.log_prob(param.value))
-
-        log_likelihood += total
+        log_likelihood += prior_total
         return jnp.squeeze(-log_likelihood)
 

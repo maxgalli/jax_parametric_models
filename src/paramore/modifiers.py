@@ -4,9 +4,23 @@ import abc
 
 import jax.numpy as jnp
 import evermore as evm
-from .distributions import Distribution
+from .distributions import Distribution, ParameterizedFunction
 
 __all__ = ["Modifier", "SymmLogNormalModifier", "AsymmetricLogNormalModifier"]
+
+
+class ScaledValue(ParameterizedFunction):
+    """Wrapper to scale a parameter or function by a modifier."""
+
+    def __init__(self, original, modifier):
+        self.original = original
+        self.modifier = modifier
+
+    @property
+    def value(self):
+        # Compute modifier value on-the-fly
+        modifier_value = self.modifier._compute_modifier_value()
+        return self.original.value * modifier_value
 
 
 class Modifier(abc.ABC):
@@ -28,17 +42,11 @@ class SymmLogNormalModifier(Modifier):
         super().__init__(parameter)
         self.kappa = float(kappa)
 
+    def _compute_modifier_value(self):
+        return self.kappa**self.parameter.value
+
     def apply(self, distribution: Distribution) -> Distribution:
-        modifier_value = self.kappa**self.parameter.value
-
-        modifier_params = distribution.modifier_parameters
-        if all(existing is not self.parameter for existing in modifier_params):
-            modifier_params = modifier_params + (self.parameter,)
-
-        distribution.modifier_parameters = modifier_params
-        distribution.extended = distribution.extended.replace(
-            value=distribution.extended.value * modifier_value
-        )
+        distribution.extended = ScaledValue(distribution.extended, self)
         return distribution
 
 
@@ -50,7 +58,7 @@ class AsymmetricLogNormalModifier(Modifier):
         self.kappa_up = float(kappa_up)
         self.kappa_down = float(kappa_down)
 
-    def apply(self, distribution: Distribution) -> Distribution:
+    def _compute_modifier_value(self):
         value = self.parameter.value
         kappa_capital = 0.125 * (
             4.0 * jnp.log(self.kappa_up / self.kappa_down)
@@ -67,13 +75,8 @@ class AsymmetricLogNormalModifier(Modifier):
                 jnp.exp(value * kappa_capital),
             ),
         )
+        return modifier_value
 
-        modifier_params = distribution.modifier_parameters
-        if all(existing is not self.parameter for existing in modifier_params):
-            modifier_params = modifier_params + (self.parameter,)
-
-        distribution.modifier_parameters = modifier_params
-        distribution.extended = distribution.extended.replace(
-            value=distribution.extended.value * modifier_value
-        )
+    def apply(self, distribution: Distribution) -> Distribution:
+        distribution.extended = ScaledValue(distribution.extended, self)
         return distribution

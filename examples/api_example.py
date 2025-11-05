@@ -21,6 +21,7 @@ from paramore import (
     Gaussian,
     ExtendedNLL,
     SumPDF,
+    ParameterizedFunction,
     plot_as_data,
     save_image,
 )
@@ -91,17 +92,60 @@ if __name__ == "__main__":
         frozen=False,
     )
 
-    def mean_function(higgs_mass, d_higgs_mass):
-        return higgs_mass + d_higgs_mass
-    
-    def mean_function_with_scale(higgs_mass, d_higgs_mass, nuisance_scale):
-        return (higgs_mass + d_higgs_mass) * (1.0 + 0.003 * nuisance_scale)
+    class MeanFunctionWithScale(ParameterizedFunction):
+        """Compute mean with scale nuisance parameter."""
 
-    def sigma_function_with_smear(sigma, nuisance_smear):
-        return sigma * (1.0 + 0.045 * nuisance_smear)
+        def __init__(
+            self,
+            higgs_mass: evm.Parameter,
+            d_higgs_mass: evm.Parameter,
+            nuisance_scale: evm.Parameter,
+        ) -> None:
+            self.higgs_mass = higgs_mass
+            self.d_higgs_mass = d_higgs_mass
+            self.nuisance_scale = nuisance_scale
 
-    def signal_rate(r, xs_ggH, br_hgg, eff, lumi):
-        return r * xs_ggH * br_hgg * eff * lumi
+        @property
+        def value(self):
+            return (self.higgs_mass.value + self.d_higgs_mass.value) * (
+                1.0 + 0.003 * self.nuisance_scale.value
+            )
+
+    class SigmaFunctionWithSmear(ParameterizedFunction):
+        """Compute sigma with smear nuisance parameter."""
+
+        def __init__(
+            self,
+            sigma: evm.Parameter,
+            nuisance_smear: evm.Parameter,
+        ) -> None:
+            self.sigma = sigma
+            self.nuisance_smear = nuisance_smear
+
+        @property
+        def value(self):
+            return self.sigma.value * (1.0 + 0.045 * self.nuisance_smear.value)
+
+    class SignalRate(ParameterizedFunction):
+        """Compute signal rate from signal strength and constants."""
+
+        def __init__(
+            self,
+            mu: evm.Parameter,
+            xs_ggH: float,
+            br_hgg: float,
+            eff: float,
+            lumi: float,
+        ) -> None:
+            self.mu = mu
+            self.xs_ggH = xs_ggH
+            self.br_hgg = br_hgg
+            self.eff = eff
+            self.lumi = lumi
+
+        @property
+        def value(self):
+            return self.mu.value * self.xs_ggH * self.br_hgg * self.eff * self.lumi
 
     params = Params(
         evm.Parameter(
@@ -169,24 +213,14 @@ if __name__ == "__main__":
     def build_model(params):
         signal_pdf = Gaussian(
             var=mass,
-            mu=evm.Parameter(
-                value=jnp.asarray(
-                    mean_function_with_scale(
-                        params.higgs_mass.value, params.d_higgs_mass.value, params.nuisance_scale.value
-                    )
-                )
+            mu=MeanFunctionWithScale(
+                params.higgs_mass, params.d_higgs_mass, params.nuisance_scale
             ),
-            sigma=evm.Parameter(
-                value=jnp.asarray(
-                    sigma_function_with_smear(
-                        params.higgs_width.value, params.nuisance_smear.value
-                    )
-                )
+            sigma=SigmaFunctionWithSmear(
+                params.higgs_width, params.nuisance_smear
             ),
-            extended=evm.Parameter(
-                value=jnp.asarray(
-                    signal_rate(params.mu.value, xs_ggH, br_hgg, eff, lumi)
-                )
+            extended=SignalRate(
+                params.mu, xs_ggH, br_hgg, eff, lumi
             ),
         )
         pho_id_modifier = SymmLogNormalModifier(
@@ -200,13 +234,6 @@ if __name__ == "__main__":
         )
         signal_pdf = pho_id_modifier.apply(signal_pdf)
         signal_pdf = jec_modifier.apply(signal_pdf)
-
-        extra_mods = (params.nuisance_scale, params.nuisance_smear)
-        mod_params = signal_pdf.modifier_parameters
-        for extra in extra_mods:
-            if all(existing is not extra for existing in mod_params):
-                mod_params = mod_params + (extra,)
-        signal_pdf.modifier_parameters = mod_params
 
         bkg_pdf = Exponential(
             var=mass,
@@ -307,7 +334,6 @@ if __name__ == "__main__":
         f"Final estimate: nuisance_smear = {float(fitted_params.nuisance_smear.value):.6f} ± {float(nuisance_smear_sigma):.6f}\n"
     )
 
-"""
     print("Scanning NLL vs mu...")
 
     denominator = loss_fn(fitresult.value, (graphdef, static, data))
@@ -401,4 +427,3 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_dir / "nll_scan.png")
     plt.savefig(output_dir / "nll_scan.pdf")
-"""
