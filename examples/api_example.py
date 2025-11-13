@@ -56,6 +56,102 @@ class Params(nnx.Pytree):
         self.nuisance_smear = nuisance_smear
 
 
+class MeanFunctionWithScale(ParameterizedFunction):
+    """Compute mean with scale nuisance parameter."""
+
+    def __init__(
+        self,
+        higgs_mass: evm.Parameter,
+        d_higgs_mass: evm.Parameter,
+        nuisance_scale: evm.Parameter,
+    ) -> None:
+        self.higgs_mass = higgs_mass
+        self.d_higgs_mass = d_higgs_mass
+        self.nuisance_scale = nuisance_scale
+
+    @property
+    def value(self):
+        return (self.higgs_mass.value + self.d_higgs_mass.value) * (
+            1.0 + 0.003 * self.nuisance_scale.value
+        )
+
+
+class SigmaFunctionWithSmear(ParameterizedFunction):
+    """Compute sigma with smear nuisance parameter."""
+
+    def __init__(
+        self,
+        sigma: evm.Parameter,
+        nuisance_smear: evm.Parameter,
+    ) -> None:
+        self.sigma = sigma
+        self.nuisance_smear = nuisance_smear
+
+    @property
+    def value(self):
+        return self.sigma.value * (1.0 + 0.045 * self.nuisance_smear.value)
+
+
+class SignalRate(ParameterizedFunction):
+    """Compute signal rate from signal strength and constants."""
+
+    def __init__(
+        self,
+        mu: evm.Parameter,
+        xs_ggH: float,
+        br_hgg: float,
+        eff: float,
+        lumi: float,
+    ) -> None:
+        self.mu = mu
+        self.xs_ggH = xs_ggH
+        self.br_hgg = br_hgg
+        self.eff = eff
+        self.lumi = lumi
+
+    @property
+    def value(self):
+        return self.mu.value * self.xs_ggH * self.br_hgg * self.eff * self.lumi
+
+
+def build_model(params, mass, xs_ggH, br_hgg, eff, lumi):
+    """Build the statistical model."""
+    signal_pdf = Gaussian(
+        var=mass,
+        mu=MeanFunctionWithScale(
+            params.higgs_mass, params.d_higgs_mass, params.nuisance_scale
+        ),
+        sigma=SigmaFunctionWithSmear(
+            params.higgs_width, params.nuisance_smear
+        ),
+        extended=SignalRate(
+            params.mu, xs_ggH, br_hgg, eff, lumi
+        ),
+    )
+    pho_id_modifier = SymmLogNormalModifier(
+        parameter=params.phoid_syst,
+        kappa=1.05,
+    )
+    jec_modifier = AsymmetricLogNormalModifier(
+        parameter=params.jec_syst,
+        kappa_up=1.056,
+        kappa_down=0.951,
+    )
+    signal_pdf = pho_id_modifier.apply(signal_pdf)
+    signal_pdf = jec_modifier.apply(signal_pdf)
+
+    bkg_pdf = Exponential(
+        var=mass,
+        lambd=params.lamb,
+        extended=params.bkg_norm,
+    )
+    model = SumPDF(
+        var=mass,
+        pdfs=[signal_pdf, bkg_pdf],
+    )
+    return model
+
+
 # double precision
 jax.config.update("jax_enable_x64", True)
 
@@ -90,61 +186,6 @@ if __name__ == "__main__":
         upper=180.0,
         frozen=False,
     )
-
-    class MeanFunctionWithScale(ParameterizedFunction):
-        """Compute mean with scale nuisance parameter."""
-
-        def __init__(
-            self,
-            higgs_mass: evm.Parameter,
-            d_higgs_mass: evm.Parameter,
-            nuisance_scale: evm.Parameter,
-        ) -> None:
-            self.higgs_mass = higgs_mass
-            self.d_higgs_mass = d_higgs_mass
-            self.nuisance_scale = nuisance_scale
-
-        @property
-        def value(self):
-            return (self.higgs_mass.value + self.d_higgs_mass.value) * (
-                1.0 + 0.003 * self.nuisance_scale.value
-            )
-
-    class SigmaFunctionWithSmear(ParameterizedFunction):
-        """Compute sigma with smear nuisance parameter."""
-
-        def __init__(
-            self,
-            sigma: evm.Parameter,
-            nuisance_smear: evm.Parameter,
-        ) -> None:
-            self.sigma = sigma
-            self.nuisance_smear = nuisance_smear
-
-        @property
-        def value(self):
-            return self.sigma.value * (1.0 + 0.045 * self.nuisance_smear.value)
-
-    class SignalRate(ParameterizedFunction):
-        """Compute signal rate from signal strength and constants."""
-
-        def __init__(
-            self,
-            mu: evm.Parameter,
-            xs_ggH: float,
-            br_hgg: float,
-            eff: float,
-            lumi: float,
-        ) -> None:
-            self.mu = mu
-            self.xs_ggH = xs_ggH
-            self.br_hgg = br_hgg
-            self.eff = eff
-            self.lumi = lumi
-
-        @property
-        def value(self):
-            return self.mu.value * self.xs_ggH * self.br_hgg * self.eff * self.lumi
 
     params = Params(
         evm.Parameter(
@@ -209,54 +250,18 @@ if __name__ == "__main__":
         )
     )
 
-    def build_model(params):
-        signal_pdf = Gaussian(
-            var=mass,
-            mu=MeanFunctionWithScale(
-                params.higgs_mass, params.d_higgs_mass, params.nuisance_scale
-            ),
-            sigma=SigmaFunctionWithSmear(
-                params.higgs_width, params.nuisance_smear
-            ),
-            extended=SignalRate(
-                params.mu, xs_ggH, br_hgg, eff, lumi
-            ),
-        )
-        pho_id_modifier = SymmLogNormalModifier(
-            parameter=params.phoid_syst,
-            kappa=1.05,
-        )
-        jec_modifier = AsymmetricLogNormalModifier(
-            parameter=params.jec_syst,
-            kappa_up=1.056,
-            kappa_down=0.951,
-        )
-        signal_pdf = pho_id_modifier.apply(signal_pdf)
-        signal_pdf = jec_modifier.apply(signal_pdf)
-
-        bkg_pdf = Exponential(
-            var=mass,
-            lambd=params.lamb,
-            extended=params.bkg_norm,
-        )
-        model = SumPDF(
-            var=mass,
-            pdfs=[signal_pdf, bkg_pdf],
-        )
-        return model
-
     params_unwrapped = unwrap(params)
     graphdef, diffable, static = nnx.split(
         params_unwrapped, evm_filter.is_dynamic_parameter, ...
     )
 
     def loss_fn(dynamic_state, args):
-        graphdef, static_state, data = args
+        graphdef, static_state, data, mass, xs_ggH, br_hgg, eff, lumi = args
         params_unwrapped = nnx.merge(
             graphdef, dynamic_state, static_state, copy=True
         )
         _, params_wrapped = wrap_checked(params_unwrapped)
-        model = build_model(params_wrapped)
+        model = build_model(params_wrapped, mass, xs_ggH, br_hgg, eff, lumi)
         nll = ExtendedNLL(model=model)
         return nll(data)
 
@@ -268,7 +273,7 @@ if __name__ == "__main__":
         solver,
         diffable,
         has_aux=False,
-        args=(graphdef, static, data),
+        args=(graphdef, static, data, mass, xs_ggH, br_hgg, eff, lumi),
         options={},
         max_steps=1000,
         throw=True,
@@ -335,7 +340,7 @@ if __name__ == "__main__":
 
     print("Scanning NLL vs mu...")
 
-    denominator = loss_fn(fitresult.value, (graphdef, static, data))
+    denominator = loss_fn(fitresult.value, (graphdef, static, data, mass, xs_ggH, br_hgg, eff, lumi))
 
     def fixed_mu_fit(mu, silent=True, params_template=params):
         params_copy = nnx.merge(*nnx.split(params_template), copy=True)
@@ -354,13 +359,13 @@ if __name__ == "__main__":
             solver,
             diffable_local,
             has_aux=False,
-            args=(graphdef_local, static_local, data),
+            args=(graphdef_local, static_local, data, mass, xs_ggH, br_hgg, eff, lumi),
             options={},
             max_steps=1000,
             throw=True,
         )
         nll_val = loss_fn(
-            fitresult_local.value, (graphdef_local, static_local, data)
+            fitresult_local.value, (graphdef_local, static_local, data, mass, xs_ggH, br_hgg, eff, lumi)
         )
 
         if not silent:

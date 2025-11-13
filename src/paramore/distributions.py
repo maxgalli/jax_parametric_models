@@ -190,12 +190,17 @@ class SumPDF(Distribution):
     def prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         return self.unnormalized_prob(x)
 
-    def sample(self, key):
+    def sample(self, sample_shape, seed=None, **kwargs):
+        """Sample from SumPDF.
+
+        Note: sample_shape is ignored for SumPDF as each component generates
+        Poisson-fluctuated event counts based on its extended term.
+        """
         samples = []
         for pdf in self.pdfs:
-            n2 = jax.random.poisson(lam=pdf.extended.value, key=key, shape=())
+            n2 = jax.random.poisson(lam=pdf.extended.value, key=seed, shape=())
             n2 = jnp.asarray(n2, dtype=jnp.int64)
-            sample = pdf.sample(sample_shape=(n2,), seed=key)
+            sample = pdf.sample(sample_shape=(n2,), seed=seed)
             samples.append(sample)
         return jnp.concatenate(samples, axis=-1)
 
