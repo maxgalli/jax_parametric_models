@@ -24,6 +24,7 @@ dependencies = [
     "dask",
     "distributed",
     "quadax",
+    "joblib>=1.5.2",
 ]
 
 [tool.setuptools]

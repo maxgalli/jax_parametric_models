@@ -1,7 +1,8 @@
+"""Probability distributions and parameterized functions for statistical modeling."""
+
 from __future__ import annotations
 
 import abc
-from typing import Optional, Sequence, Set, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -9,14 +10,18 @@ from flax import nnx
 from jaxtyping import Array, Float
 from quadax import quadgk
 
-import evermore as evm
 
+# ============================================================================
+# ParameterizedFunction: composable functions of Parameters
+# ============================================================================
 
 class ParameterizedFunction(nnx.Pytree):
     """Base class for functions that depend on evermore Parameters.
 
-    Subclasses should store evm.Parameter objects as attributes and implement
-    a .value property that returns the computed result as a jnp.array.
+    Subclasses should store evm.Parameter objects or other ParameterizedFunctions
+    as attributes and implement a .value property that returns the computed result.
+
+    This enables incremental composition: functions can take other functions as input.
     """
 
     @property
@@ -26,238 +31,242 @@ class ParameterizedFunction(nnx.Pytree):
         raise NotImplementedError
 
 
-class Distribution(nnx.Pytree):
-    """Base helper around ``evermore`` parameters to describe PDFs."""
+# ============================================================================
+# BasePDF classes
+# ============================================================================
 
-    def __init__(
-        self,
-        *,
-        var: evm.Parameter,
-        extended: Optional[evm.Parameter] = None,
-    ) -> None:
-        if extended is None:
-            extended = evm.Parameter(
-                value=jnp.array(1.0, dtype=var.value.dtype),
-                name=f"{var.name}_extended",
-                lower=jnp.array(0.0, dtype=var.value.dtype),
-                upper=None,
-                frozen=False,
-            )
-        if not isinstance(extended, (evm.Parameter, ParameterizedFunction)):
-            raise TypeError(
-                "extended must be an evermore.Parameter, ParameterizedFunction, or None; "
-                f"got {type(extended)}"
-            )
+class BasePDF(nnx.Pytree):
+    """Abstract base class for PDFs storing VALUES (JAX arrays)."""
 
-        self.var = var
-        self.extended = extended
-
-    @abc.abstractmethod
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        """Return unnormalized probability density at x."""
         raise NotImplementedError
 
-    @abc.abstractmethod
-    def sample(self, sample_shape, seed=None, **kwargs) -> Float[Array, "..."]:
-        raise NotImplementedError
+    def integrate(self, lower=None, upper=None) -> Float[Array, ""]:
+        """Integrate the unnormalized probability over [lower, upper]."""
+        lower = self.lower if lower is None else lower
+        upper = self.upper if upper is None else upper
+        epsabs = epsrel = 1e-5
+        integral, _ = quadgk(
+            self.unnormalized_prob, [lower, upper], epsabs=epsabs, epsrel=epsrel
+        )
+        return integral
 
     def prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        """Return normalized probability density at x."""
         norm = self.integrate()
         return self.unnormalized_prob(x) / norm
 
     def log_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        """Return log of normalized probability density at x."""
         return jnp.log(self.prob(x))
 
-    def integrate(self, lower=None, upper=None) -> Float[Array, "..."]:
-        lower = self.var.lower if lower is None else lower
-        upper = self.var.upper if upper is None else upper
+    def sample(self, key, n_events: int) -> Float[Array, "n_events"]:
+        """Sample n_events from the distribution.
 
-        epsabs = epsrel = 1e-5
-        integral, _ = quadgk(
-            self.unnormalized_prob,
-            [lower, upper],
-            epsabs=epsabs,
-            epsrel=epsrel,
-        )
-        return integral
+        Args:
+            key: JAX random key
+            n_events: Number of events to sample
 
-    def __call__(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        return self.prob(x)
+        Returns:
+            Array of sampled values
+        """
+        raise NotImplementedError
 
 
-class Gaussian(Distribution):
-    """Gaussian distribution with mean and standard deviation as parameters."""
+class Gaussian(BasePDF):
+    """Gaussian PDF with fixed mean and standard deviation."""
 
     def __init__(
         self,
-        *,
-        var: evm.Parameter,
-        mu: evm.Parameter,
-        sigma: evm.Parameter,
-        extended: Optional[evm.Parameter] = None,
-    ) -> None:
-        super().__init__(var=var, extended=extended)
-        self.mu = mu
-        self.sigma = sigma
+        mu: Float[Array, ""] | float,
+        sigma: Float[Array, ""] | float,
+        lower: Float[Array, ""] | float,
+        upper: Float[Array, ""] | float,
+    ):
+        """Initialize Gaussian PDF.
 
-    def unnormalized_prob(self, value):
-        return jnp.exp(-0.5 * ((value - self.mu.value) / self.sigma.value) ** 2)
-
-    def sample(self, sample_shape, seed=None, **kwargs):
-        return (
-            jax.random.normal(seed, shape=sample_shape, dtype=self.mu.value.dtype)
-            * self.sigma.value
-            + self.mu.value
-        )
-
-
-class Exponential(Distribution):
-    def __init__(
-        self,
-        *,
-        var: evm.Parameter,
-        lambd: evm.Parameter,
-        extended: Optional[evm.Parameter] = None,
-    ) -> None:
-        super().__init__(var=var, extended=extended)
-        self.lambd = lambd
-
-    def unnormalized_prob(self, value):
-        return jnp.exp(-self.lambd.value * value)
-
-    def sample(self, sample_shape, seed=None, **kwargs):
-        lower = self.var.lower
-        upper = self.var.upper
-        u = jax.random.uniform(seed, shape=sample_shape)
-        lambda_val = self.lambd.value
-        z = jnp.exp(-lambda_val * lower) - u * (
-            jnp.exp(-lambda_val * lower) - jnp.exp(-lambda_val * upper)
-        )
-        return -jnp.log(z) / lambda_val
-
-
-class SumExtended(ParameterizedFunction):
-    """Compute the sum of extended values from multiple PDFs."""
-
-    def __init__(self, pdfs: Tuple[Distribution, ...]):
-        self._pdfs = nnx.data(pdfs)
-
-    @property
-    def pdfs(self) -> Tuple[Distribution, ...]:
-        data = self._pdfs
-        if hasattr(data, "value"):
-            return data.value  # type: ignore[return-value]
-        return data
-
-    @property
-    def value(self):
-        totals = jnp.stack([jnp.asarray(pdf.extended.value) for pdf in self.pdfs])
-        return jnp.sum(totals, axis=0)
-
-
-class SumPDF(Distribution):
-    def __init__(
-        self,
-        *,
-        var: evm.Parameter,
-        pdfs: Sequence[Distribution],
-    ) -> None:
-        pdfs_tuple = tuple(pdfs)
-        extended = SumExtended(pdfs_tuple)
-        super().__init__(var=var, extended=extended)
-        self._pdfs = nnx.data(pdfs_tuple)
-
-    @property
-    def pdfs(self) -> Tuple[Distribution, ...]:
-        data = self._pdfs
-        if hasattr(data, "value"):
-            return data.value  # type: ignore[return-value]
-        return data
+        Args:
+            mu: Mean of the Gaussian
+            sigma: Standard deviation of the Gaussian
+            lower: Lower bound for the observable
+            upper: Upper bound for the observable
+        """
+        self.mu = jnp.asarray(mu)
+        self.sigma = jnp.asarray(sigma)
+        self.lower = jnp.asarray(lower)
+        self.upper = jnp.asarray(upper)
 
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        weights = jnp.stack(
-            [
-                jnp.asarray(pdf.extended.value)
-                / jnp.asarray(self.extended.value)
-                for pdf in self.pdfs
-            ],
-            axis=0,
+        return jnp.exp(-0.5 * ((x - self.mu) / self.sigma) ** 2)
+
+    def sample(self, key, n_events: int) -> Float[Array, "n_events"]:
+        return jax.random.normal(key, shape=(n_events,)) * self.sigma + self.mu
+
+
+class Exponential(BasePDF):
+    """Exponential PDF with fixed rate parameter."""
+
+    def __init__(
+        self,
+        lambd: Float[Array, ""] | float,
+        lower: Float[Array, ""] | float,
+        upper: Float[Array, ""] | float,
+    ):
+        """Initialize Exponential PDF.
+
+        Args:
+            lambd: Rate parameter (inverse of mean)
+            lower: Lower bound for the observable
+            upper: Upper bound for the observable
+        """
+        self.lambd = jnp.asarray(lambd)
+        self.lower = jnp.asarray(lower)
+        self.upper = jnp.asarray(upper)
+
+    def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        return jnp.exp(-self.lambd * x)
+
+    def sample(self, key, n_events: int) -> Float[Array, "n_events"]:
+        """Sample from truncated exponential using inverse CDF."""
+        u = jax.random.uniform(key, shape=(n_events,))
+        z = jnp.exp(-self.lambd * self.lower) - u * (
+            jnp.exp(-self.lambd * self.lower) - jnp.exp(-self.lambd * self.upper)
         )
-        stacked = jnp.stack([pdf(x) for pdf in self.pdfs], axis=0)
-        reshape_dims = (weights.shape[0],) + (1,) * (stacked.ndim - 1)
-        weights = weights.reshape(reshape_dims)
-        return jnp.sum(weights * stacked, axis=0)
+        return -jnp.log(z) / self.lambd
+
+
+class SumPDF(BasePDF):
+    """Weighted sum of multiple PDFs.
+
+    This class represents a mixture of PDFs weighted by their expected counts.
+    The prob() method returns the weighted average of the component PDFs'
+    normalized probabilities.
+
+    Args:
+        pdfs: List of PDF instances
+        extended_vals: List of expected event counts (one per PDF)
+        lower: Lower bound for the observable
+        upper: Upper bound for the observable
+    """
+
+    def __init__(
+        self,
+        pdfs: list[BasePDF],
+        extended_vals: list[Float[Array, ""] | ParameterizedFunction | float],
+        lower: Float[Array, ""] | float,
+        upper: Float[Array, ""] | float,
+    ):
+        """Initialize SumPDF.
+
+        Args:
+            pdfs: List of PDF instances
+            extended_vals: List of expected event counts (can be floats, arrays, or ParameterizedFunctions)
+            lower: Lower bound for the observable
+            upper: Upper bound for the observable
+        """
+        self.pdfs = nnx.data(pdfs)
+        self.extended_vals = nnx.data(extended_vals)
+        self.lower = jnp.asarray(lower)
+        self.upper = jnp.asarray(upper)
 
     def prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        return self.unnormalized_prob(x)
+        """Return weighted sum of normalized probabilities.
 
-    def sample(self, sample_shape, seed=None, **kwargs):
-        """Sample from SumPDF.
-
-        Note: sample_shape is ignored for SumPDF as each component generates
-        Poisson-fluctuated event counts based on its extended term.
+        Computes: sum_i (nu_i / nu_total) * p_i(x)
+        where p_i(x) is the normalized probability from PDF i.
         """
+        # Unwrap data if needed
+        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
+        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+
+        # Total expected count
+        nu_total = sum(extended_vals)
+
+        # Compute weighted sum of normalized probabilities
+        result = jnp.zeros_like(x)
+        for pdf, extended_val in zip(pdfs, extended_vals):
+            weight = extended_val / nu_total
+            result = result + weight * pdf.prob(x)
+
+        return result
+
+    def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        """Not used for SumPDF, raises NotImplementedError."""
+        raise NotImplementedError(
+            "SumPDF computes weighted sum of normalized PDFs, use prob() instead"
+        )
+
+    def log_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        """Return log of weighted sum probability."""
+        return jnp.log(self.prob(x))
+
+    def sample(self, key, n_events: int) -> Float[Array, "..."]:
+        """Sample from mixture distribution (fixed event count).
+
+        Uses exact expected counts (no Poisson fluctuation).
+        For extended likelihood toys, use sample_extended() instead.
+
+        Args:
+            key: JAX random key
+            n_events: Total number of events to sample (ignored, uses expected counts)
+
+        Returns:
+            Array of sampled events
+        """
+        # Unwrap data if needed
+        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
+        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+
+        # For each component, sample according to its expected count
         samples = []
-        for pdf in self.pdfs:
-            n2 = jax.random.poisson(lam=pdf.extended.value, key=seed, shape=())
-            n2 = jnp.asarray(n2, dtype=jnp.int64)
-            sample = pdf.sample(sample_shape=(n2,), seed=seed)
-            samples.append(sample)
-        return jnp.concatenate(samples, axis=-1)
+        for pdf, extended_val in zip(pdfs, extended_vals):
+            key, subkey = jax.random.split(key)
+            # Number of events from this component
+            n_component = int(jnp.round(extended_val))
+            if n_component > 0:
+                component_samples = pdf.sample(subkey, n_events=n_component)
+                samples.append(component_samples)
 
-
-class ExtendedNLL:
-    """Generalised negative log-likelihood for a sum of PDFs."""
-
-    def __init__(self, model: Distribution) -> None:
-        self.model = model
-        # Collect all parameters with priors at initialization (before JIT)
-        self._params_with_priors = self._collect_parameters_with_priors(model)
-
-    def _collect_parameters_with_priors(self, node, found=None):
-        """Recursively collect all parameters that have priors."""
-        if found is None:
-            found = []
-
-        if isinstance(node, evm.Parameter):
-            if getattr(node, "prior", None) is not None:
-                # Check if not already in list (by identity)
-                if all(p is not node for p in found):
-                    found.append(node)
+        if samples:
+            return jnp.concatenate(samples)
         else:
-            # Traverse any object that might contain parameters
-            for attr_name in dir(node):
-                if attr_name.startswith('_') or attr_name in ('mro', 'value'):
-                    continue
-                try:
-                    attr = getattr(node, attr_name)
-                    # Check for evm.Parameter first, even if callable
-                    if isinstance(attr, evm.Parameter):
-                        self._collect_parameters_with_priors(attr, found)
-                    elif not callable(attr) and (hasattr(attr, '__dict__') or isinstance(attr, (tuple, list))):
-                        # Traverse objects that might contain parameters
-                        if isinstance(attr, (tuple, list)):
-                            for item in attr:
-                                self._collect_parameters_with_priors(item, found)
-                        elif not isinstance(attr, (str, int, float, bool, type(None))):
-                            self._collect_parameters_with_priors(attr, found)
-                except Exception:
-                    pass
-        return found
+            return jnp.array([])
 
-    def __call__(self, x):
-        N = x.shape[0]
-        nu_total = self.model.extended.value
-        pdf = self.model.prob(x)
+    def sample_extended(self, key) -> Float[Array, "..."]:
+        """Sample from extended mixture distribution with Poisson fluctuation.
 
-        poisson_term = -nu_total + N * jnp.log(nu_total)
-        log_likelihood = poisson_term + jnp.sum(jnp.log(pdf + 1e-8))
+        For each component:
+        1. Poisson-sample the number of events from expected count
+        2. Sample that many events from the component PDF
+        3. Concatenate all samples
 
-        # Add priors for all parameters collected at initialization
-        prior_total = jnp.array(0.0)
-        for param in self._params_with_priors:
-            prior_val = param.prior.log_prob(param.value)
-            prior_total = prior_total + jnp.sum(prior_val)
+        This is the correct way to generate toys for extended likelihood fits.
 
-        log_likelihood += prior_total
-        return jnp.squeeze(-log_likelihood)
+        Args:
+            key: JAX random key
 
+        Returns:
+            Array of sampled events (variable length due to Poisson)
+        """
+        # Unwrap data if needed
+        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
+        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+
+        samples = []
+        for pdf, extended_val in zip(pdfs, extended_vals):
+            # Poisson-sample the number of events
+            key, subkey = jax.random.split(key)
+            n_events = jax.random.poisson(lam=extended_val, key=subkey, shape=())
+            n_events = jnp.asarray(n_events, dtype=jnp.int32)
+
+            # Sample events from this component PDF
+            key, subkey = jax.random.split(key)
+            if n_events > 0:
+                component_samples = pdf.sample(subkey, int(n_events))
+                samples.append(component_samples)
+
+        if samples:
+            return jnp.concatenate(samples)
+        else:
+            return jnp.array([])
