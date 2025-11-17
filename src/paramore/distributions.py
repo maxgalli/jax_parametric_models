@@ -270,3 +270,57 @@ class SumPDF(BasePDF):
             return jnp.concatenate(samples)
         else:
             return jnp.array([])
+
+    def sample_extended_fixed(self, key, max_events: int) -> tuple[Float[Array, "max_events"], Float[Array, "max_events"]]:
+        """Sample from extended mixture with fixed output size (vmap-friendly).
+
+        Samples exactly max_events from the mixture, then uses Poisson fluctuation
+        to determine how many are "real" events vs padding.
+
+        Args:
+            key: JAX random key
+            max_events: Maximum number of events to sample (fixed size)
+
+        Returns:
+            samples: (max_events,) array of sampled values
+            mask: (max_events,) boolean array, True for valid events based on Poisson draw
+        """
+        # Unwrap data if needed
+        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
+        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+
+        # Split keys for Poisson draws and sampling
+        key_poisson, key_sample = jax.random.split(key)
+
+        # Poisson-sample total number of events from sum of expectations
+        nu_total = sum(extended_vals)
+        n_total = jax.random.poisson(key_poisson, lam=nu_total, shape=())
+
+        # Sample max_events from the mixture (using mixture weights)
+        # Component probabilities (normalized by total expected count)
+        weights = jnp.array([ext_val / nu_total for ext_val in extended_vals])
+
+        # For each of max_events samples, choose which component it comes from
+        key_component, key_values = jax.random.split(key_sample)
+        component_keys = jax.random.split(key_values, max_events)
+
+        # Sample component indices using categorical distribution
+        component_indices = jax.random.categorical(
+            key_component, logits=jnp.log(weights), shape=(max_events,)
+        )
+
+        # Sample one event from each component (will select based on component_indices)
+        def sample_from_component(k, comp_idx):
+            """Sample from the component indicated by comp_idx."""
+            # Sample from each PDF
+            samples_per_pdf = jnp.array([pdf.sample(k, 1)[0] for pdf in pdfs])
+            # Select the one corresponding to comp_idx
+            return samples_per_pdf[comp_idx]
+
+        samples = jax.vmap(sample_from_component)(component_keys, component_indices)
+
+        # Create mask: first n_total events are valid
+        idx = jnp.arange(max_events)
+        mask = idx < n_total
+
+        return samples, mask

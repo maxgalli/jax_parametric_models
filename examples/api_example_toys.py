@@ -1,13 +1,18 @@
-"""Toy study using paramore.
+"""Toy study using paramore with vmapped toy generation.
 
 This script demonstrates:
-1. Generating toy datasets with parameter sampling from priors
+1. Generating toy datasets with vmapped parameter sampling and event generation
 2. Parallel fitting of toys using vmap
+3. Working with PyTrees directly in vmapped functions
 
 Parallelization strategy:
-- Prior sampling: vmapped (fixed output shape)
-- Toy generation: sequential loop (variable-length arrays per toy)
-- Toy fitting: vmapped (after padding toys to uniform length)
+- Prior sampling: vmapped evm.sample.sample_from_priors (one call per toy)
+- Toy generation: vmapped sample_single_toy (works with PyTree parameters)
+- Toy fitting: vmapped fit_single_toy (uniform array length via masks)
+
+The implementation uses JAX's native PyTree handling - parameters are passed
+as PyTrees through vmap, and JAX automatically vectorizes over the leading
+dimension of arrays within the PyTree structure.
 """
 import pandas as pd
 import numpy as np
@@ -39,123 +44,74 @@ wrap_checked = checkify.checkify(wrap)
 # Enable double precision
 jax.config.update("jax_enable_x64", True)
 
-
-def sample_toys_from_model(
-    params,
-    mass,
-    xs_ggH,
-    br_hgg,
-    eff,
-    lumi,
-    ntoys: int,
-    key,
-):
-    """Sample toy datasets from the model.
-
-    PARALLELIZATION NOTE: This function uses a sequential loop over toys
-    because each toy has a variable number of events (Poisson-sampled).
-    JAX vmap requires fixed shapes, so we cannot vmap the toy generation itself.
-    However, prior sampling IS vmapped for efficiency.
+def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_events):
+    """Sample a single toy dataset (to be vmapped).
 
     Args:
-        params: Params PyTree with parameters
-        mass: Observable parameter
-        xs_ggH, br_hgg, eff, lumi: Constants
-        ntoys: Number of toy datasets
         key: JAX random key
+        params_pytree: PyTree of parameter values (from evm.sample.sample_from_priors)
+        mass, xs_ggH, br_hgg, eff, lumi: Constants
+        max_events: Maximum number of events to sample
 
     Returns:
-        List of toy datasets (variable-length arrays)
+        samples: (max_events,) array
+        mask: (max_events,) boolean array
     """
-    # Collect parameters with priors
-    params_with_priors = []
-    for path, value in nnx.iter_graph(params):
-        if isinstance(value, evm.Parameter):
-            if getattr(value, "prior", None) is not None:
-                params_with_priors.append(value)
+    # Build PDFs with sampled parameters using ParameterizedFunctions
+    signal_mu_func = MeanFunctionWithScale(
+        params_pytree.higgs_mass,
+        params_pytree.d_higgs_mass,
+        params_pytree.nuisance_scale,
+    )
+    signal_sigma_func = SigmaFunctionWithSmear(
+        params_pytree.higgs_width,
+        params_pytree.nuisance_smear,
+    )
 
-    # PARALLELIZATION: Vmap prior sampling for all toys at once
-    sampled_values = {}
-    for param in params_with_priors:
-        key, subkey = jax.random.split(key)
-        keys = jax.random.split(subkey, ntoys)
-        # Vmap: sample from prior for all toys in parallel
-        samples = jax.vmap(lambda k: param.prior.sample(key=k, shape=()))(keys)
-        sampled_values[param.name] = samples
+    signal_pdf = pm.Gaussian(
+        mu=signal_mu_func.value,
+        sigma=signal_sigma_func.value,
+        lower=mass.lower,
+        upper=mass.upper,
+    )
 
-    # NO PARALLELIZATION: Sequential loop over toys
-    toys = []
-    keys = jax.random.split(key, ntoys)
+    background_pdf = pm.Exponential(
+        lambd=params_pytree.lamb.value,
+        lower=mass.lower,
+        upper=mass.upper,
+    )
 
-    for itoy in range(ntoys):
-        # Create a copy of params
-        graphdef, state = nnx.split(params)
-        params_copy = nnx.merge(graphdef, state, copy=True)
+    # Compute signal rate with modifiers using paramore classes
+    signal_rate_func = SignalRate(params_pytree.mu, xs_ggH, br_hgg, eff, lumi)
 
-        # Update parameters with sampled values
-        for param in params_with_priors:
-            sampled_val = sampled_values[param.name][itoy]
-            # Update parameter value in place
-            for path, value in nnx.iter_graph(params_copy):
-                if isinstance(value, evm.Parameter) and value.name == param.name:
-                    value.value = sampled_val
+    # Apply modifiers
+    phoid_modifier = pm.SymmLogNormalModifier(
+        parameter=params_pytree.phoid_syst, kappa=1.05
+    )
+    signal_rate_with_phoid = phoid_modifier.apply(signal_rate_func)
 
-        # Build model with updated parameters using ParameterizedFunctions
-        signal_mu_func = MeanFunctionWithScale(
-            params_copy.higgs_mass,
-            params_copy.d_higgs_mass,
-            params_copy.nuisance_scale,
-        )
-        signal_sigma_func = SigmaFunctionWithSmear(
-            params_copy.higgs_width,
-            params_copy.nuisance_smear,
-        )
+    jec_modifier = pm.AsymmetricLogNormalModifier(
+        parameter=params_pytree.jec_syst,
+        kappa_up=1.056,
+        kappa_down=0.951,
+    )
+    signal_rate_with_all_modifiers = jec_modifier.apply(signal_rate_with_phoid)
 
-        signal_pdf = pm.Gaussian(
-            mu=signal_mu_func.value,
-            sigma=signal_sigma_func.value,
-            lower=mass.lower,
-            upper=mass.upper,
-        )
+    signal_rate = signal_rate_with_all_modifiers.value
+    bkg_rate = params_pytree.bkg_norm.value
 
-        background_pdf = pm.Exponential(
-            lambd=params_copy.lamb.value,
-            lower=mass.lower,
-            upper=mass.upper,
-        )
+    # Create SumPDF and sample with fixed size
+    sum_pdf = pm.SumPDF(
+        pdfs=[signal_pdf, background_pdf],
+        extended_vals=[signal_rate, bkg_rate],
+        lower=mass.lower,
+        upper=mass.upper,
+    )
 
-        # Compute signal rate with modifiers
-        signal_rate_func = SignalRate(params_copy.mu, xs_ggH, br_hgg, eff, lumi)
+    # Sample with fixed output size
+    samples, mask = sum_pdf.sample_extended_fixed(key, max_events)
 
-        phoid_modifier = pm.SymmLogNormalModifier(
-            parameter=params_copy.phoid_syst, kappa=1.05
-        )
-        signal_rate_with_phoid = phoid_modifier.apply(signal_rate_func)
-
-        jec_modifier = pm.AsymmetricLogNormalModifier(
-            parameter=params_copy.jec_syst,
-            kappa_up=1.056,
-            kappa_down=0.951,
-        )
-        signal_rate_with_all_modifiers = jec_modifier.apply(signal_rate_with_phoid)
-
-        signal_rate = signal_rate_with_all_modifiers.value
-        bkg_rate = params_copy.bkg_norm.value
-
-        # Create SumPDF and sample with Poisson fluctuation
-        sum_pdf = pm.SumPDF(
-            pdfs=[signal_pdf, background_pdf],
-            extended_vals=[signal_rate, bkg_rate],
-            lower=mass.lower,
-            upper=mass.upper,
-        )
-
-        # Sample from SumPDF with Poisson fluctuation
-        toy_data = sum_pdf.sample_extended(keys[itoy])
-
-        toys.append(toy_data)
-
-    return toys
+    return samples, mask
 
 
 if __name__ == "__main__":
@@ -243,45 +199,72 @@ if __name__ == "__main__":
     )
 
     # ========================================================================
-    # Generate toy datasets
+    # Calculate max_events for toy generation
     # ========================================================================
-    ntoys = 100
-    print(f"Generating {ntoys} toy datasets...")
+
+    # Compute nominal expected events
+    nominal_signal_rate = params.mu.value * xs_ggH * br_hgg * eff * lumi
+    nominal_bkg_rate = params.bkg_norm.value
+    expected_total = nominal_signal_rate + nominal_bkg_rate
+
+    # Add 6 sigma buffer
+    max_events = int(expected_total + 6 * jnp.sqrt(expected_total))
+    print(f"Expected total events: {expected_total:.1f}")
+    print(f"Max events (expected + 6σ): {max_events}")
+
+    # ========================================================================
+    # Generate toy datasets using vmap
+    # ========================================================================
+    ntoys = 1000
+    print(f"\nGenerating {ntoys} toy datasets (vmapped)...")
 
     t0 = time.time()
-    toys = sample_toys_from_model(
-        params, mass, xs_ggH, br_hgg, eff, lumi, ntoys=ntoys,
-        key=jax.random.PRNGKey(42)
-    )
+
+    # Sample from priors using evermore's built-in function
+    key = jax.random.PRNGKey(42)
+    key_prior, key_toys = jax.random.split(key)
+
+    # Split keys for prior sampling (one per toy)
+    prior_keys = jax.random.split(key_prior, ntoys)
+    # Split keys for toy generation (one per toy)
+    toy_keys = jax.random.split(key_toys, ntoys)
+
+    # Vmap over sample_from_priors to get a batch of parameter samples
+    # Each call produces a PyTree with scalar .value for each parameter
+    # Vmapping creates a PyTree where each .value has shape (ntoys,)
+    def sample_params_for_toy(rng_key):
+        """Sample parameters for one toy using nnx.Rngs."""
+        rngs = nnx.Rngs(default=rng_key)
+        return evm.sample.sample_from_priors(rngs, params)
+
+    sampled_params_batched = jax.vmap(sample_params_for_toy)(prior_keys)
+
+    # Now vmap over toy generation
+    # sampled_params_batched is a PyTree where each parameter's .value has shape (ntoys,)
+    # We need to index into it for each toy
+    def sample_toy_with_params(key, param_tree_batch, idx):
+        """Extract single toy params and generate toy dataset."""
+        # Extract parameters for this toy
+        single_toy_params = jax.tree.map(lambda p: p[idx], param_tree_batch)
+        return sample_single_toy(key, single_toy_params, mass, xs_ggH, br_hgg, eff, lumi, max_events)
+
+    toys, masks = jax.vmap(
+        lambda k, idx: sample_toy_with_params(k, sampled_params_batched, idx),
+        in_axes=(0, 0)
+    )(toy_keys, jnp.arange(ntoys))
+
     t1 = time.time()
     toy_generation_time = t1 - t0
     print(f"✓ Toy generation took: {toy_generation_time:.3f} seconds ({ntoys/toy_generation_time:.2f} toys/sec)")
 
     # ========================================================================
-    # STEP 1: Pad toys to uniform length for vmapping
+    # Summary of toy event counts
     # ========================================================================
-    print(f"Padding {ntoys} toys for parallel fitting...")
-
-    event_counts = jnp.array([len(toy) for toy in toys])
-    max_events = int(jnp.max(event_counts))
-    print(
-        f"  Event counts: min={int(jnp.min(event_counts))}, "
-        f"max={max_events}, mean={float(jnp.mean(event_counts)):.1f}"
-    )
-
-    # Pad each toy to max_events length with NaN
-    padded_toys = []
-    masks = []
-    for toy in toys:
-        n_events = len(toy)
-        padded = jnp.pad(toy, (0, max_events - n_events), constant_values=jnp.nan)
-        mask = jnp.concatenate([jnp.ones(n_events), jnp.zeros(max_events - n_events)])
-        padded_toys.append(padded)
-        masks.append(mask)
-
-    # Stack into arrays of shape (ntoys, max_events)
-    padded_toys = jnp.stack(padded_toys)
-    masks = jnp.stack(masks)
+    event_counts = jnp.sum(masks, axis=1)
+    print(f"\nToy event counts:")
+    print(f"  min={int(jnp.min(event_counts))}, "
+          f"max={int(jnp.max(event_counts))}, "
+          f"mean={float(jnp.mean(event_counts)):.1f}")
 
     # ========================================================================
     # STEP 2: Define masked loss function for toy fits
@@ -293,6 +276,7 @@ if __name__ == "__main__":
         params_unwrapped, evm_filter.is_dynamic_parameter, ...
     )
 
+    @nnx.jit
     def loss_fn_masked(dynamic_state, args):
         """Masked loss function for toy fits."""
         graphdef, static_state, data, mask, mass, xs_ggH, br_hgg, eff, lumi = args
@@ -381,6 +365,7 @@ if __name__ == "__main__":
 
     solver = optimistix.BFGS(rtol=1e-5, atol=1e-7, verbose=frozenset())
 
+    @nnx.jit
     def fit_single_toy(toy_data, mask):
         """Fit a single toy dataset (will be vmapped)."""
         fitresult = optimistix.minimise(
@@ -398,14 +383,14 @@ if __name__ == "__main__":
     # ========================================================================
     # STEP 4: Vmap the fit function over all toys
     # ========================================================================
-    print(f"Running {ntoys} toy fits in parallel...")
+    print(f"\nRunning {ntoys} toy fits in parallel...")
 
     # Vmap over the first axis (ntoys dimension)
     fit_all_toys = jax.vmap(fit_single_toy, in_axes=(0, 0))
 
     # Execute all fits in parallel
     t0 = time.time()
-    all_fitted_values = fit_all_toys(padded_toys, masks)
+    all_fitted_values = fit_all_toys(toys, masks)
     # Force computation to finish (JAX is lazy)
     all_fitted_values = jax.tree.map(lambda x: x.block_until_ready(), all_fitted_values)
     t1 = time.time()

@@ -193,6 +193,7 @@ if __name__ == "__main__":
         params_unwrapped, evm_filter.is_dynamic_parameter, ...
     )
 
+    @nnx.jit
     def loss_fn(dynamic_state, args):
         """Extended NLL computed using paramore."""
         graphdef, static_state, data, mass, xs_ggH, br_hgg, eff, lumi = args
