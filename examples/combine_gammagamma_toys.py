@@ -30,8 +30,8 @@ import time
 # Import from paramore
 import paramore as pm
 
-# Import common classes from api_example
-from api_example import (
+# Import common classes from combine_gammagamma
+from combine_gammagamma import (
     Params,
     MeanFunctionWithScale,
     SigmaFunctionWithSmear,
