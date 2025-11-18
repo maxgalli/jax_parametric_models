@@ -1,30 +1,28 @@
 """Paramore: JAX-based parametric statistical modeling."""
 
 from .distributions import (
-    ParameterizedFunction,
     BasePDF,
     Gaussian,
     Exponential,
     SumPDF,
 )
 from .modifiers import (
-    ScaledValue,
     SymmLogNormalModifier,
     AsymmetricLogNormalModifier,
+    ComposedModifier,
 )
 from .likelihood import create_extended_nll
 
 __all__ = [
     # Distributions
-    "ParameterizedFunction",
     "BasePDF",
     "Gaussian",
     "Exponential",
     "SumPDF",
     # Modifiers
-    "ScaledValue",
     "SymmLogNormalModifier",
     "AsymmetricLogNormalModifier",
+    "ComposedModifier",
     # Likelihood
     "create_extended_nll",
 ]

@@ -31,12 +31,7 @@ import time
 import paramore as pm
 
 # Import common classes from combine_gammagamma
-from combine_gammagamma import (
-    Params,
-    MeanFunctionWithScale,
-    SigmaFunctionWithSmear,
-    SignalRate,
-)
+from combine_gammagamma import Params
 
 
 wrap_checked = checkify.checkify(wrap)
@@ -57,20 +52,17 @@ def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_e
         samples: (max_events,) array
         mask: (max_events,) boolean array
     """
-    # Build PDFs with sampled parameters using ParameterizedFunctions
-    signal_mu_func = MeanFunctionWithScale(
-        params_pytree.higgs_mass,
-        params_pytree.d_higgs_mass,
-        params_pytree.nuisance_scale,
+    # Build PDFs with sampled parameters
+    signal_mu = (params_pytree.higgs_mass.value + params_pytree.d_higgs_mass.value) * (
+        1.0 + 0.003 * params_pytree.nuisance_scale.value
     )
-    signal_sigma_func = SigmaFunctionWithSmear(
-        params_pytree.higgs_width,
-        params_pytree.nuisance_smear,
+    signal_sigma = params_pytree.higgs_width.value * (
+        1.0 + 0.045 * params_pytree.nuisance_smear.value
     )
 
     signal_pdf = pm.Gaussian(
-        mu=signal_mu_func.value,
-        sigma=signal_sigma_func.value,
+        mu=signal_mu,
+        sigma=signal_sigma,
         lower=mass.lower,
         upper=mass.upper,
     )
@@ -81,21 +73,24 @@ def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_e
         upper=mass.upper,
     )
 
-    # Compute signal rate with modifiers using paramore classes
-    signal_rate_func = SignalRate(params_pytree.mu, xs_ggH, br_hgg, eff, lumi)
+    # Compute signal rate with modifiers
+    signal_rate_base = evm.Parameter(
+        value=params_pytree.mu.value * xs_ggH * br_hgg * eff * lumi,
+        name="signal_rate_base",
+    )
 
     # Apply modifiers
     phoid_modifier = pm.SymmLogNormalModifier(
         parameter=params_pytree.phoid_syst, kappa=1.05
     )
-    signal_rate_with_phoid = phoid_modifier.apply(signal_rate_func)
 
     jec_modifier = pm.AsymmetricLogNormalModifier(
         parameter=params_pytree.jec_syst,
         kappa_up=1.056,
         kappa_down=0.951,
     )
-    signal_rate_with_all_modifiers = jec_modifier.apply(signal_rate_with_phoid)
+    composed_modifier = pm.ComposedModifier(phoid_modifier, jec_modifier)
+    signal_rate_with_all_modifiers = composed_modifier.apply(signal_rate_base)
 
     signal_rate = signal_rate_with_all_modifiers.value
     bkg_rate = params_pytree.bkg_norm.value
@@ -288,19 +283,16 @@ if __name__ == "__main__":
         _, params_wrapped = wrap_checked(params_unwrapped_local)
 
         # Build PDFs with current parameters
-        signal_mu_func = MeanFunctionWithScale(
-            params_wrapped.higgs_mass,
-            params_wrapped.d_higgs_mass,
-            params_wrapped.nuisance_scale,
+        signal_mu = (params_wrapped.higgs_mass.value + params_wrapped.d_higgs_mass.value) * (
+            1.0 + 0.003 * params_wrapped.nuisance_scale.value
         )
-        signal_sigma_func = SigmaFunctionWithSmear(
-            params_wrapped.higgs_width,
-            params_wrapped.nuisance_smear,
+        signal_sigma = params_wrapped.higgs_width.value * (
+            1.0 + 0.045 * params_wrapped.nuisance_smear.value
         )
 
         signal_pdf = pm.Gaussian(
-            mu=signal_mu_func.value,
-            sigma=signal_sigma_func.value,
+            mu=signal_mu,
+            sigma=signal_sigma,
             lower=mass.lower,
             upper=mass.upper,
         )
@@ -312,18 +304,21 @@ if __name__ == "__main__":
         )
 
         # Compute signal rate with modifiers
-        signal_rate_func = SignalRate(params_wrapped.mu, xs_ggH, br_hgg, eff, lumi)
+        signal_rate_base = evm.Parameter(
+            value=params_wrapped.mu.value * xs_ggH * br_hgg * eff * lumi,
+            name="signal_rate_base",
+        )
         phoid_modifier = pm.SymmLogNormalModifier(
             parameter=params_wrapped.phoid_syst, kappa=1.05
         )
-        signal_rate_with_phoid = phoid_modifier.apply(signal_rate_func)
 
         jec_modifier = pm.AsymmetricLogNormalModifier(
             parameter=params_wrapped.jec_syst,
             kappa_up=1.056,
             kappa_down=0.951,
         )
-        signal_rate_with_all_modifiers = jec_modifier.apply(signal_rate_with_phoid)
+        composed_modifier = pm.ComposedModifier(phoid_modifier, jec_modifier)
+        signal_rate_with_all_modifiers = composed_modifier.apply(signal_rate_base)
         signal_rate = signal_rate_with_all_modifiers.value
 
         bkg_rate = params_wrapped.bkg_norm.value

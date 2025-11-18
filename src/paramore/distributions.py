@@ -12,26 +12,6 @@ from quadax import quadgk
 
 
 # ============================================================================
-# ParameterizedFunction: composable functions of Parameters
-# ============================================================================
-
-class ParameterizedFunction(nnx.Pytree):
-    """Base class for functions that depend on evermore Parameters.
-
-    Subclasses should store evm.Parameter objects or other ParameterizedFunctions
-    as attributes and implement a .value property that returns the computed result.
-
-    This enables incremental composition: functions can take other functions as input.
-    """
-
-    @property
-    @abc.abstractmethod
-    def value(self) -> Float[Array, "..."]:
-        """Compute and return the function value."""
-        raise NotImplementedError
-
-
-# ============================================================================
 # BasePDF classes
 # ============================================================================
 

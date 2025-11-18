@@ -27,77 +27,6 @@ wrap_checked = checkify.checkify(wrap)
 
 
 # ============================================================================
-# Example-specific ParameterizedFunctions
-# ============================================================================
-
-class MeanFunctionWithScale(pm.ParameterizedFunction):
-    """Compute mean with scale nuisance parameter.
-
-    Takes Parameters as input and returns: (mu + d_mu) * (1 + 0.003 * scale)
-    """
-
-    def __init__(
-        self,
-        higgs_mass: evm.Parameter,
-        d_higgs_mass: evm.Parameter,
-        nuisance_scale: evm.Parameter,
-    ):
-        self.higgs_mass = higgs_mass
-        self.d_higgs_mass = d_higgs_mass
-        self.nuisance_scale = nuisance_scale
-
-    @property
-    def value(self):
-        return (self.higgs_mass.value + self.d_higgs_mass.value) * (
-            1.0 + 0.003 * self.nuisance_scale.value
-        )
-
-
-class SigmaFunctionWithSmear(pm.ParameterizedFunction):
-    """Compute sigma with smear nuisance parameter.
-
-    Takes a Parameter as input and returns: sigma * (1 + 0.045 * smear)
-    """
-
-    def __init__(
-        self,
-        sigma: evm.Parameter,
-        nuisance_smear: evm.Parameter,
-    ):
-        self.sigma = sigma
-        self.nuisance_smear = nuisance_smear
-
-    @property
-    def value(self):
-        return self.sigma.value * (1.0 + 0.045 * self.nuisance_smear.value)
-
-
-class SignalRate(pm.ParameterizedFunction):
-    """Compute signal rate from signal strength and constants.
-
-    Takes a Parameter (mu) and constants, returns: mu * xs * br * eff * lumi
-    """
-
-    def __init__(
-        self,
-        mu: evm.Parameter,
-        xs_ggH: float,
-        br_hgg: float,
-        eff: float,
-        lumi: float,
-    ):
-        self.mu = mu
-        self.xs_ggH = xs_ggH
-        self.br_hgg = br_hgg
-        self.eff = eff
-        self.lumi = lumi
-
-    @property
-    def value(self):
-        return self.mu.value * self.xs_ggH * self.br_hgg * self.eff * self.lumi
-
-
-# ============================================================================
 # Parameters PyTree
 # ============================================================================
 
@@ -203,20 +132,14 @@ if __name__ == "__main__":
         errors, params_wrapped = wrap_checked(params_unwrapped_local)
 
         # ====================================================================
-        # Compute signal PDF parameters using ParameterizedFunctions
+        # Compute signal PDF parameters directly
         # ====================================================================
-        signal_mu_func = MeanFunctionWithScale(
-            params_wrapped.higgs_mass,
-            params_wrapped.d_higgs_mass,
-            params_wrapped.nuisance_scale,
+        signal_mu = (params_wrapped.higgs_mass.value + params_wrapped.d_higgs_mass.value) * (
+            1.0 + 0.003 * params_wrapped.nuisance_scale.value
         )
-        signal_sigma_func = SigmaFunctionWithSmear(
-            params_wrapped.higgs_width,
-            params_wrapped.nuisance_smear,
+        signal_sigma = params_wrapped.higgs_width.value * (
+            1.0 + 0.045 * params_wrapped.nuisance_smear.value
         )
-
-        signal_mu = signal_mu_func.value
-        signal_sigma = signal_sigma_func.value
 
         # Create signal PDF
         signal_pdf = pm.Gaussian(
@@ -227,20 +150,23 @@ if __name__ == "__main__":
         )
 
         # ====================================================================
-        # Compute signal expected count using ParameterizedFunction + Modifiers
+        # Compute signal expected count using evm.Parameter + Modifiers
         # ====================================================================
-        signal_rate_func = SignalRate(params_wrapped.mu, xs_ggH, br_hgg, eff, lumi)
+        signal_rate_base = evm.Parameter(
+            value=params_wrapped.mu.value * xs_ggH * br_hgg * eff * lumi,
+            name="signal_rate_base",
+        )
 
         # Apply modifiers
         phoid_modifier = pm.SymmLogNormalModifier(parameter=params_wrapped.phoid_syst, kappa=1.05)
-        signal_rate_with_phoid = phoid_modifier.apply(signal_rate_func)
 
         jec_modifier = pm.AsymmetricLogNormalModifier(
             parameter=params_wrapped.jec_syst,
             kappa_up=1.056,
             kappa_down=0.951,
         )
-        signal_rate_with_all_modifiers = jec_modifier.apply(signal_rate_with_phoid)
+        composed_modifier = pm.ComposedModifier(phoid_modifier, jec_modifier)
+        signal_rate_with_all_modifiers = composed_modifier.apply(signal_rate_base)
 
         signal_rate = signal_rate_with_all_modifiers.value
 

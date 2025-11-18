@@ -4,34 +4,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import evermore as evm
-from .distributions import ParameterizedFunction
 
-__all__ = ["ScaledValue", "SymmLogNormalModifier", "AsymmetricLogNormalModifier"]
-
-
-class ScaledValue(ParameterizedFunction):
-    """Wrapper that scales a ParameterizedFunction by a modifier.
-
-    Takes a base ParameterizedFunction and a modifier, returns: base * modifier_value
-    This enables composable modifiers on expected values.
-    """
-
-    def __init__(self, base: ParameterizedFunction, modifier):
-        """Initialize ScaledValue.
-
-        Args:
-            base: The original ParameterizedFunction to be scaled
-            modifier: A modifier object with _compute_modifier_value() method
-        """
-        self.base = base
-        self.modifier = modifier
-
-    @property
-    def value(self):
-        """Return the scaled value."""
-        # Compute modifier value on-the-fly
-        modifier_value = self.modifier._compute_modifier_value()
-        return self.base.value * modifier_value
+__all__ = ["SymmLogNormalModifier", "AsymmetricLogNormalModifier", "ComposedModifier"]
 
 
 class SymmLogNormalModifier:
@@ -50,20 +24,25 @@ class SymmLogNormalModifier:
         self.parameter = parameter
         self.kappa = float(kappa)
 
-    def _compute_modifier_value(self):
-        """Compute kappa^alpha where alpha is the parameter value."""
-        return jnp.power(self.kappa, self.parameter.value)
-
-    def apply(self, base: ParameterizedFunction) -> ParameterizedFunction:
-        """Apply modifier to a ParameterizedFunction, returning scaled version.
+    def apply(self, base: evm.Parameter) -> evm.Parameter:
+        """Apply modifier to a Parameter, returning scaled Parameter.
 
         Args:
-            base: ParameterizedFunction to be modified
+            base: Parameter to be modified
 
         Returns:
-            ScaledValue wrapping the base function
+            New Parameter with scaled value
         """
-        return ScaledValue(base, self)
+        modifier_value = jnp.power(self.kappa, self.parameter.value)
+        scaled_value = base.value * modifier_value
+
+        return evm.Parameter(
+            value=scaled_value,
+            name=f"{base.name}_scaled_{self.parameter.name}",
+            lower=None,
+            upper=None,
+            frozen=base.frozen,
+        )
 
 
 class AsymmetricLogNormalModifier:
@@ -110,13 +89,52 @@ class AsymmetricLogNormalModifier:
         )
         return modifier_value
 
-    def apply(self, base: ParameterizedFunction) -> ParameterizedFunction:
-        """Apply modifier to a ParameterizedFunction, returning scaled version.
+    def apply(self, base: evm.Parameter) -> evm.Parameter:
+        """Apply modifier to a Parameter, returning scaled Parameter.
 
         Args:
-            base: ParameterizedFunction to be modified
+            base: Parameter to be modified
 
         Returns:
-            ScaledValue wrapping the base function
+            New Parameter with scaled value
         """
-        return ScaledValue(base, self)
+        modifier_value = self._compute_modifier_value()
+        scaled_value = base.value * modifier_value
+
+        return evm.Parameter(
+            value=scaled_value,
+            name=f"{base.name}_scaled_{self.parameter.name}",
+            lower=None,
+            upper=None,
+            frozen=base.frozen,
+        )
+
+
+class ComposedModifier:
+    """Compose multiple modifiers into a single modifier.
+
+    Applies modifiers sequentially: the output of one modifier becomes
+    the input to the next.
+    """
+
+    def __init__(self, *modifiers):
+        """Initialize ComposedModifier.
+
+        Args:
+            *modifiers: Variable number of modifier objects, each with an apply() method
+        """
+        self.modifiers = modifiers
+
+    def apply(self, base: evm.Parameter) -> evm.Parameter:
+        """Apply all modifiers sequentially to a Parameter.
+
+        Args:
+            base: Parameter to be modified
+
+        Returns:
+            New Parameter with all modifiers applied
+        """
+        result = base
+        for modifier in self.modifiers:
+            result = modifier.apply(result)
+        return result
