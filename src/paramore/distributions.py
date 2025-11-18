@@ -133,7 +133,7 @@ class SumPDF(BasePDF):
     def __init__(
         self,
         pdfs: list[BasePDF],
-        extended_vals: list[Float[Array, ""] | ParameterizedFunction | float],
+        extended_vals: list[Float[Array, ""] | float],
         lower: Float[Array, ""] | float,
         upper: Float[Array, ""] | float,
     ):
@@ -141,7 +141,7 @@ class SumPDF(BasePDF):
 
         Args:
             pdfs: List of PDF instances
-            extended_vals: List of expected event counts (can be floats, arrays, or ParameterizedFunctions)
+            extended_vals: List of expected event counts (floats or arrays)
             lower: Lower bound for the observable
             upper: Upper bound for the observable
         """
