@@ -14,30 +14,32 @@ The implementation uses JAX's native PyTree handling - parameters are passed
 as PyTrees through vmap, and JAX automatically vectorizes over the leading
 dimension of arrays within the PyTree structure.
 """
-import pandas as pd
-import numpy as np
-import jax.numpy as jnp
-import evermore as evm
-from flax import nnx
-import jax
-from evermore.parameters.transform import MinuitTransform, unwrap, wrap
-from jax.experimental import checkify
-from evermore.parameters import filter as evm_filter
-from pathlib import Path
-import optimistix
-import time
 
-# Import from paramore
-import paramore as pm
+import time
+from pathlib import Path
+
+import evermore as evm
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optimistix
+import pandas as pd
 
 # Import common classes from combine_gammagamma
 from combine_gammagamma import Params
+from evermore.parameters import filter as evm_filter
+from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from flax import nnx
+from jax.experimental import checkify
 
+# Import from paramore
+import paramore as pm
 
 wrap_checked = checkify.checkify(wrap)
 
 # Enable double precision
 jax.config.update("jax_enable_x64", True)
+
 
 def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_events):
     """Sample a single toy dataset (to be vmapped).
@@ -53,10 +55,10 @@ def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_e
         mask: (max_events,) boolean array
     """
     # Build PDFs with sampled parameters
-    signal_mu = (params_pytree.higgs_mass.value + params_pytree.d_higgs_mass.value) * (
-        1.0 + 0.003 * params_pytree.nuisance_scale.value
-    )
-    signal_sigma = params_pytree.higgs_width.value * (
+    signal_mu = (
+        params_pytree.higgs_mass.get_value() + params_pytree.d_higgs_mass.value
+    ) * (1.0 + 0.003 * params_pytree.nuisance_scale.value)
+    signal_sigma = params_pytree.higgs_width.get_value() * (
         1.0 + 0.045 * params_pytree.nuisance_smear.value
     )
 
@@ -75,7 +77,7 @@ def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_e
 
     # Compute signal rate with modifiers
     signal_rate_base = evm.Parameter(
-        value=params_pytree.mu.value * xs_ggH * br_hgg * eff * lumi,
+        value=params_pytree.mu.get_value() * xs_ggH * br_hgg * eff * lumi,
         name="signal_rate_base",
     )
 
@@ -198,7 +200,7 @@ if __name__ == "__main__":
     # ========================================================================
 
     # Compute nominal expected events
-    nominal_signal_rate = params.mu.value * xs_ggH * br_hgg * eff * lumi
+    nominal_signal_rate = params.mu.get_value() * xs_ggH * br_hgg * eff * lumi
     nominal_bkg_rate = params.bkg_norm.value
     expected_total = nominal_signal_rate + nominal_bkg_rate
 
@@ -225,8 +227,8 @@ if __name__ == "__main__":
     toy_keys = jax.random.split(key_toys, ntoys)
 
     # Vmap over sample_from_priors to get a batch of parameter samples
-    # Each call produces a PyTree with scalar .value for each parameter
-    # Vmapping creates a PyTree where each .value has shape (ntoys,)
+    # Each call produces a PyTree with scalar .get_value() for each parameter
+    # Vmapping creates a PyTree where each .get_value() has shape (ntoys,)
     def sample_params_for_toy(rng_key):
         """Sample parameters for one toy using nnx.Rngs."""
         rngs = nnx.Rngs(default=rng_key)
@@ -235,31 +237,37 @@ if __name__ == "__main__":
     sampled_params_batched = jax.vmap(sample_params_for_toy)(prior_keys)
 
     # Now vmap over toy generation
-    # sampled_params_batched is a PyTree where each parameter's .value has shape (ntoys,)
+    # sampled_params_batched is a PyTree where each parameter's .get_value() has shape (ntoys,)
     # We need to index into it for each toy
     def sample_toy_with_params(key, param_tree_batch, idx):
         """Extract single toy params and generate toy dataset."""
         # Extract parameters for this toy
         single_toy_params = jax.tree.map(lambda p: p[idx], param_tree_batch)
-        return sample_single_toy(key, single_toy_params, mass, xs_ggH, br_hgg, eff, lumi, max_events)
+        return sample_single_toy(
+            key, single_toy_params, mass, xs_ggH, br_hgg, eff, lumi, max_events
+        )
 
     toys, masks = jax.vmap(
         lambda k, idx: sample_toy_with_params(k, sampled_params_batched, idx),
-        in_axes=(0, 0)
+        in_axes=(0, 0),
     )(toy_keys, jnp.arange(ntoys))
 
     t1 = time.time()
     toy_generation_time = t1 - t0
-    print(f"✓ Toy generation took: {toy_generation_time:.3f} seconds ({ntoys/toy_generation_time:.2f} toys/sec)")
+    print(
+        f"✓ Toy generation took: {toy_generation_time:.3f} seconds ({ntoys / toy_generation_time:.2f} toys/sec)"
+    )
 
     # ========================================================================
     # Summary of toy event counts
     # ========================================================================
     event_counts = jnp.sum(masks, axis=1)
-    print(f"\nToy event counts:")
-    print(f"  min={int(jnp.min(event_counts))}, "
-          f"max={int(jnp.max(event_counts))}, "
-          f"mean={float(jnp.mean(event_counts)):.1f}")
+    print("\nToy event counts:")
+    print(
+        f"  min={int(jnp.min(event_counts))}, "
+        f"max={int(jnp.max(event_counts))}, "
+        f"mean={float(jnp.mean(event_counts)):.1f}"
+    )
 
     # ========================================================================
     # STEP 2: Define masked loss function for toy fits
@@ -283,10 +291,10 @@ if __name__ == "__main__":
         _, params_wrapped = wrap_checked(params_unwrapped_local)
 
         # Build PDFs with current parameters
-        signal_mu = (params_wrapped.higgs_mass.value + params_wrapped.d_higgs_mass.value) * (
-            1.0 + 0.003 * params_wrapped.nuisance_scale.value
-        )
-        signal_sigma = params_wrapped.higgs_width.value * (
+        signal_mu = (
+            params_wrapped.higgs_mass.get_value() + params_wrapped.d_higgs_mass.value
+        ) * (1.0 + 0.003 * params_wrapped.nuisance_scale.value)
+        signal_sigma = params_wrapped.higgs_width.get_value() * (
             1.0 + 0.045 * params_wrapped.nuisance_smear.value
         )
 
@@ -305,7 +313,7 @@ if __name__ == "__main__":
 
         # Compute signal rate with modifiers
         signal_rate_base = evm.Parameter(
-            value=params_wrapped.mu.value * xs_ggH * br_hgg * eff * lumi,
+            value=params_wrapped.mu.get_value() * xs_ggH * br_hgg * eff * lumi,
             name="signal_rate_base",
         )
         phoid_modifier = pm.SymmLogNormalModifier(

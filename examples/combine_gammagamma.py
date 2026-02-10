@@ -6,22 +6,22 @@ This example demonstrates:
 3. Computing extended negative log-likelihood
 4. Fitting to data and computing uncertainties
 """
-import pandas as pd
-import numpy as np
-import jax.numpy as jnp
-import evermore as evm
-from flax import nnx
-import jax
-from evermore.parameters.transform import MinuitTransform, unwrap, wrap
-from jax.experimental import checkify
-from evermore.parameters import filter as evm_filter
+
 from pathlib import Path
+
+import evermore as evm
+import jax
+import jax.numpy as jnp
 import optimistix
+import pandas as pd
+from evermore.parameters import filter as evm_filter
+from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from flax import nnx
+from jax.experimental import checkify
 from jax.flatten_util import ravel_pytree
 
 # Import from paramore
 import paramore as pm
-
 
 wrap_checked = checkify.checkify(wrap)
 
@@ -29,6 +29,7 @@ wrap_checked = checkify.checkify(wrap)
 # ============================================================================
 # Parameters PyTree
 # ============================================================================
+
 
 class Params(nnx.Pytree):
     """Container for all parameters."""
@@ -98,16 +99,58 @@ if __name__ == "__main__":
 
     params = Params(
         mass=mass,
-        higgs_mass=evm.Parameter(value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True),
-        d_higgs_mass=evm.Parameter(value=0.000848571, name="d_higgs_mass", lower=-5.0, upper=5.0, transform=minuit_transform, frozen=True),
-        higgs_width=evm.Parameter(value=1.99705, name="higgs_width", lower=1.0, upper=5.0, transform=minuit_transform, frozen=True),
-        lamb=evm.Parameter(value=0.1, name="lamb", lower=0.0, upper=1.0, transform=minuit_transform),
-        bkg_norm=evm.Parameter(value=float(df_data.shape[0]), name="bkg_norm", lower=0.0, upper=1e6, transform=minuit_transform),
-        mu=evm.Parameter(value=1.0, name="mu", lower=0.0, upper=10.0, transform=minuit_transform),
-        phoid_syst=evm.NormalParameter(value=0.0, name="phoid_syst", transform=minuit_transform),
-        jec_syst=evm.NormalParameter(value=0.0, name="jec_syst", transform=minuit_transform),
-        nuisance_scale=evm.NormalParameter(value=0.0, name="nuisance_scale", lower=-5.0, upper=5.0, transform=minuit_transform),
-        nuisance_smear=evm.NormalParameter(value=0.0, name="nuisance_smear", lower=-5.0, upper=5.0, transform=minuit_transform),
+        higgs_mass=evm.Parameter(
+            value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True
+        ),
+        d_higgs_mass=evm.Parameter(
+            value=0.000848571,
+            name="d_higgs_mass",
+            lower=-5.0,
+            upper=5.0,
+            transform=minuit_transform,
+            frozen=True,
+        ),
+        higgs_width=evm.Parameter(
+            value=1.99705,
+            name="higgs_width",
+            lower=1.0,
+            upper=5.0,
+            transform=minuit_transform,
+            frozen=True,
+        ),
+        lamb=evm.Parameter(
+            value=0.1, name="lamb", lower=0.0, upper=1.0, transform=minuit_transform
+        ),
+        bkg_norm=evm.Parameter(
+            value=float(df_data.shape[0]),
+            name="bkg_norm",
+            lower=0.0,
+            upper=1e6,
+            transform=minuit_transform,
+        ),
+        mu=evm.Parameter(
+            value=1.0, name="mu", lower=0.0, upper=10.0, transform=minuit_transform
+        ),
+        phoid_syst=evm.NormalParameter(
+            value=0.0, name="phoid_syst", transform=minuit_transform
+        ),
+        jec_syst=evm.NormalParameter(
+            value=0.0, name="jec_syst", transform=minuit_transform
+        ),
+        nuisance_scale=evm.NormalParameter(
+            value=0.0,
+            name="nuisance_scale",
+            lower=-5.0,
+            upper=5.0,
+            transform=minuit_transform,
+        ),
+        nuisance_smear=evm.NormalParameter(
+            value=0.0,
+            name="nuisance_smear",
+            lower=-5.0,
+            upper=5.0,
+            transform=minuit_transform,
+        ),
     )
 
     # ========================================================================
@@ -128,17 +171,20 @@ if __name__ == "__main__":
         graphdef, static_state, data, mass, xs_ggH, br_hgg, eff, lumi = args
 
         # Reconstruct params
-        params_unwrapped_local = nnx.merge(graphdef, dynamic_state, static_state, copy=True)
+        params_unwrapped_local = nnx.merge(
+            graphdef, dynamic_state, static_state, copy=True
+        )
         errors, params_wrapped = wrap_checked(params_unwrapped_local)
 
         # ====================================================================
         # Compute signal PDF parameters directly
         # ====================================================================
-        signal_mu = (params_wrapped.higgs_mass.value + params_wrapped.d_higgs_mass.value) * (
-            1.0 + 0.003 * params_wrapped.nuisance_scale.value
-        )
-        signal_sigma = params_wrapped.higgs_width.value * (
-            1.0 + 0.045 * params_wrapped.nuisance_smear.value
+        signal_mu = (
+            params_wrapped.higgs_mass.get_value()
+            + params_wrapped.d_higgs_mass.get_value()
+        ) * (1.0 + 0.003 * params_wrapped.nuisance_scale.get_value())
+        signal_sigma = params_wrapped.higgs_width.get_value() * (
+            1.0 + 0.045 * params_wrapped.nuisance_smear.get_value()
         )
 
         # Create signal PDF
@@ -153,12 +199,14 @@ if __name__ == "__main__":
         # Compute signal expected count using evm.Parameter + Modifiers
         # ====================================================================
         signal_rate_base = evm.Parameter(
-            value=params_wrapped.mu.value * xs_ggH * br_hgg * eff * lumi,
+            value=params_wrapped.mu.get_value() * xs_ggH * br_hgg * eff * lumi,
             name="signal_rate_base",
         )
 
         # Apply modifiers
-        phoid_modifier = pm.SymmLogNormalModifier(parameter=params_wrapped.phoid_syst, kappa=1.05)
+        phoid_modifier = pm.SymmLogNormalModifier(
+            parameter=params_wrapped.phoid_syst, kappa=1.05
+        )
 
         jec_modifier = pm.AsymmetricLogNormalModifier(
             parameter=params_wrapped.jec_syst,
@@ -168,18 +216,18 @@ if __name__ == "__main__":
         composed_modifier = pm.ComposedModifier(phoid_modifier, jec_modifier)
         signal_rate_with_all_modifiers = composed_modifier.apply(signal_rate_base)
 
-        signal_rate = signal_rate_with_all_modifiers.value
+        signal_rate = signal_rate_with_all_modifiers.get_value()
 
         # ====================================================================
         # Create background PDF
         # ====================================================================
         background_pdf = pm.Exponential(
-            lambd=params_wrapped.lamb.value,
+            lambd=params_wrapped.lamb.get_value(),
             lower=mass.lower,
             upper=mass.upper,
         )
 
-        bkg_rate = params_wrapped.bkg_norm.value
+        bkg_rate = params_wrapped.bkg_norm.get_value()
 
         # ====================================================================
         # Compute extended NLL using paramore
@@ -233,9 +281,12 @@ if __name__ == "__main__":
         Returns:
             Standard deviation of the parameter
         """
+
         def value_fn(flat_params):
             diffable_params = unravel(flat_params)
-            params_unwrapped_local = nnx.merge(graphdef, diffable_params, static, copy=True)
+            params_unwrapped_local = nnx.merge(
+                graphdef, diffable_params, static, copy=True
+            )
             _, params_wrapped = wrap_checked(params_unwrapped_local)
             return selector(params_wrapped)
 
@@ -247,22 +298,34 @@ if __name__ == "__main__":
         return jnp.sqrt(variance)
 
     # Compute uncertainties
-    mu_sigma = param_uncertainty(lambda p: p.mu.value)
-    bkg_norm_sigma = param_uncertainty(lambda p: p.bkg_norm.value)
-    lamb_sigma = param_uncertainty(lambda p: p.lamb.value)
-    phoid_sigma = param_uncertainty(lambda p: p.phoid_syst.value)
-    jec_sigma = param_uncertainty(lambda p: p.jec_syst.value)
-    nuisance_scale_sigma = param_uncertainty(lambda p: p.nuisance_scale.value)
-    nuisance_smear_sigma = param_uncertainty(lambda p: p.nuisance_smear.value)
+    mu_sigma = param_uncertainty(lambda p: p.mu.get_value())
+    bkg_norm_sigma = param_uncertainty(lambda p: p.bkg_norm.get_value())
+    lamb_sigma = param_uncertainty(lambda p: p.lamb.get_value())
+    phoid_sigma = param_uncertainty(lambda p: p.phoid_syst.get_value())
+    jec_sigma = param_uncertainty(lambda p: p.jec_syst.get_value())
+    nuisance_scale_sigma = param_uncertainty(lambda p: p.nuisance_scale.get_value())
+    nuisance_smear_sigma = param_uncertainty(lambda p: p.nuisance_smear.get_value())
 
     print("\n" + "=" * 60)
     print("Fit Results:")
     print("=" * 60)
-    print(f"r = {float(fitted_params.mu.value):.6f} ± {float(mu_sigma):.6f}")
-    print(f"bkg_norm = {float(fitted_params.bkg_norm.value):.2f} ± {float(bkg_norm_sigma):.2f}")
-    print(f"lamb = {float(fitted_params.lamb.value):.6f} ± {float(lamb_sigma):.6f}")
-    print(f"phoid_syst = {float(fitted_params.phoid_syst.value):.6f} ± {float(phoid_sigma):.6f}")
-    print(f"jec_syst = {float(fitted_params.jec_syst.value):.6f} ± {float(jec_sigma):.6f}")
-    print(f"nuisance_scale = {float(fitted_params.nuisance_scale.value):.6f} ± {float(nuisance_scale_sigma):.6f}")
-    print(f"nuisance_smear = {float(fitted_params.nuisance_smear.value):.6f} ± {float(nuisance_smear_sigma):.6f}")
+    print(f"r = {float(fitted_params.mu.get_value()):.6f} ± {float(mu_sigma):.6f}")
+    print(
+        f"bkg_norm = {float(fitted_params.bkg_norm.get_value()):.2f} ± {float(bkg_norm_sigma):.2f}"
+    )
+    print(
+        f"lamb = {float(fitted_params.lamb.get_value()):.6f} ± {float(lamb_sigma):.6f}"
+    )
+    print(
+        f"phoid_syst = {float(fitted_params.phoid_syst.get_value()):.6f} ± {float(phoid_sigma):.6f}"
+    )
+    print(
+        f"jec_syst = {float(fitted_params.jec_syst.get_value()):.6f} ± {float(jec_sigma):.6f}"
+    )
+    print(
+        f"nuisance_scale = {float(fitted_params.nuisance_scale.get_value()):.6f} ± {float(nuisance_scale_sigma):.6f}"
+    )
+    print(
+        f"nuisance_smear = {float(fitted_params.nuisance_smear.get_value()):.6f} ± {float(nuisance_smear_sigma):.6f}"
+    )
     print("=" * 60)
