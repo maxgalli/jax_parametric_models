@@ -1,28 +1,19 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import mplhep as hep
-from scipy import interpolate
 from pathlib import Path
-import jax.numpy as jnp
+
 import evermore as evm
-import equinox as eqx
-from typing import NamedTuple, List
 import jax
-import optax
-from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+import jax.numpy as jnp
+import mplhep as hep
 import optimistix
+import pandas as pd
+from evermore.parameters import filter as evm_filter
+from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from flax import nnx
+from jax.experimental import checkify
 
+import paramore as pm
 
-from paramore import (
-    Exponential,
-    Gaussian,
-    ExtendedNLL,
-    SumPDF,
-    plot_as_data,
-    save_image,
-)
-
+wrap_checked = checkify.checkify(wrap)
 
 # double precision
 jax.config.update("jax_enable_x64", True)
@@ -65,18 +56,24 @@ if __name__ == "__main__":
     def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
 
-    class Params(eqx.Module):
-        # signal model
-        higgs_mass: evm.Parameter
-        d_higgs_mass: evm.Parameter
-        higgs_width: evm.Parameter
-        # bkg model
-        lamb: evm.Parameter
-        bkg_norm: evm.Parameter
-        # signal rate
-        mu: evm.Parameter
-        # nuisances
-        phoid_syst: evm.NormalParameter
+    class Params(nnx.Pytree):
+        def __init__(
+            self,
+            higgs_mass,
+            d_higgs_mass,
+            higgs_width,
+            lamb,
+            bkg_norm,
+            mu,
+            phoid_syst,
+        ):
+            self.higgs_mass = higgs_mass
+            self.d_higgs_mass = d_higgs_mass
+            self.higgs_width = higgs_width
+            self.lamb = lamb
+            self.bkg_norm = bkg_norm
+            self.mu = mu
+            self.phoid_syst = phoid_syst
 
     params = Params(
         higgs_mass=evm.Parameter(
@@ -111,42 +108,39 @@ if __name__ == "__main__":
             "only_channel": {
                 "processes": {
                     "signal": {
-                        "pdf": Gaussian(
-                            var=mass,
-                            mu=evm.Parameter(
-                                mean_function(
-                                    params.higgs_mass.value, params.d_higgs_mass.value
-                                )
+                        "pdf": pm.Gaussian(
+                            mu=mean_function(
+                                params.higgs_mass.get_value(),
+                                params.d_higgs_mass.get_value(),
                             ),
-                            sigma=params.higgs_width,
-                            extended=evm.Parameter(
-                                model_ggH_Tag0_norm_function(
-                                    params.mu.value,
-                                    xs_ggH,
-                                    br_hgg,
-                                    eff,
-                                    lumi,
-                                )
-                            ),
+                            sigma=params.higgs_width.get_value(),
+                            lower=mass.lower,
+                            upper=mass.upper,
                         ),
-                        "expected_yield": None,
-                        "nuisances": [
-                            {
-                                "name": "phoid_syst",
-                                "type": "lnN",
-                                "parameter": params.phoid_syst,
-                                "value": 1.05,
-                            }
+                        "rate": evm.Parameter(
+                            model_ggH_Tag0_norm_function(
+                                params.mu.get_value(),
+                                xs_ggH,
+                                br_hgg,
+                                eff,
+                                lumi,
+                            ),
+                            name="signal_rate",
+                        ),
+                        "modifiers": [
+                            pm.SymmLogNormalModifier(
+                                parameter=params.phoid_syst, kappa=1.05
+                            ),
                         ],
                     },
                     "background": {
-                        "pdf": Exponential(
-                            var=mass,
-                            lambd=params.lamb,
-                            extended=params.bkg_norm,
+                        "pdf": pm.Exponential(
+                            lambd=params.lamb.get_value(),
+                            lower=mass.lower,
+                            upper=mass.upper,
                         ),
-                        "expected_yield": None,
-                        "nuisances": [],
+                        "rate": params.bkg_norm,
+                        "modifiers": [],
                     },
                 },
                 "observations": data,
@@ -154,61 +148,64 @@ if __name__ == "__main__":
         }
         return dc
 
-    def dc_to_nll(dc):
+    def dc_to_nll(params, dc):
         nll_terms = []
         for channel_name, channel in dc.items():
-            data = channel["observations"]
+            obs_data = channel["observations"]
             pdfs = []
-            constraints = []
+            extended_vals = []
             for proc_name, proc in channel["processes"].items():
                 pdf = proc["pdf"]
-                for nuisance_name in proc["nuisances"]:
-                    if nuisance_name["type"] == "lnN":
-                        print(pdf.extended)
-                        new_extended = pdf.extended * jnp.exp(
-                            nuisance_name["parameter"].value
-                            * jnp.log(nuisance_name["value"])
-                        )
-                        pdf = eqx.tree_at(lambda p: p.extended, pdf, new_extended)
-                        print(pdf.extended)
-                    constraints.append(evm.loss.get_log_probs(nuisance_name["parameter"]))
+                rate = proc["rate"]
+                for modifier in proc["modifiers"]:
+                    rate = modifier.apply(rate)
                 pdfs.append(pdf)
-            total_pdf = SumPDF(var=mass, pdfs=pdfs)
-            nll = ExtendedNLL(model=total_pdf)
-            nll_value = nll(data)
-            if constraints:
-                nll_value += evm.util.sum_over_leaves(constraints)
-            nll_terms.append(nll_value)
+                extended_vals.append(rate.get_value())
+
+            sum_pdf = pm.SumPDF(
+                pdfs=pdfs,
+                extended_vals=extended_vals,
+                lower=mass.lower,
+                upper=mass.upper,
+            )
+            nll = pm.create_extended_nll(params, sum_pdf, obs_data)
+            nll_terms.append(nll)
         total_nll = jnp.sum(jnp.array(nll_terms))
         return total_nll
-    
-    print(dc_to_nll(datacard(params)))
 
-    @eqx.filter_jit
-    def loss(diffable, static, data):
-        params = wrap(evm.tree.combine(diffable, static))
-        dc = datacard(params)
-        nll = dc_to_nll(dc)
+    print(dc_to_nll(params, datacard(params)))
+
+    # Unwrap and split for optimization
+    params_unwrapped = unwrap(params)
+    graphdef, diffable, static = nnx.split(
+        params_unwrapped, evm_filter.is_dynamic_parameter, ...
+    )
+
+    @nnx.jit
+    def loss_fn(dynamic_state, args):
+        graphdef, static_state, data = args
+        params_unwrapped_local = nnx.merge(
+            graphdef, dynamic_state, static_state, copy=True
+        )
+        _, params_wrapped = wrap_checked(params_unwrapped_local)
+        dc = datacard(params_wrapped)
+        nll = dc_to_nll(params_wrapped, dc)
         return nll
-
-    diffable, static = evm.tree.partition(unwrap(params))
-
-    def optx_loss_fn(diffable, args):
-        return loss(diffable, *args)
 
     solver = optimistix.BFGS(
         rtol=1e-5, atol=1e-7, verbose=frozenset({"step_size", "loss"})
     )
     fitresult = optimistix.minimise(
-        optx_loss_fn,
+        loss_fn,
         solver,
         diffable,
         has_aux=False,
-        args=(static, data),
+        args=(graphdef, static, data),
         options={},
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
+    fitted_unwrapped = nnx.merge(graphdef, fitresult.value, static, copy=True)
+    fitted_params = wrap(fitted_unwrapped)
 
-    print(f"Final estimate: r = {fitted_params.mu.value}\n")
+    print(f"Final estimate: r = {fitted_params.mu.get_value()}\n")

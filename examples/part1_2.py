@@ -9,22 +9,20 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import mplhep as hep
 import numpy as np
-import pandas as pd
-from scipy import interpolate
 import optimistix
-
-from paramore import (
-    Exponential,
-    Gaussian,
-    SumPDF,
-    ExtendedNLL,
-    plot_as_data,
-    save_image,
-)
+import pandas as pd
 from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from flax import nnx
+from jax.experimental import checkify
+from plotting_helpers import plot_as_data, save_image
+from scipy import interpolate
+
+from paramore import Exponential, Gaussian, SumPDF, create_extended_nll, create_nll
 
 # double precision
 jax.config.update("jax_enable_x64", True)
+
+wrap_checked = checkify.checkify(wrap)
 
 # plot styling
 hep.style.use("CMS")
@@ -42,7 +40,7 @@ if __name__ == "__main__":
 
     fig, ax = plt.subplots()
     ax = plot_as_data(df[var_name], nbins=100, ax=ax)
-    ax.set_xlabel("$m_{\gamma\gamma}$ [GeV]")
+    ax.set_xlabel(r"$m_{\gamma\gamma}$ [GeV]")
     save_image("part1_signal_mass", output_dir)
 
     data = jax.numpy.array(df["CMS_hgg_mass"].values)
@@ -77,26 +75,31 @@ if __name__ == "__main__":
     def mean_function(higgs_mass, d_higgs_mass):
         return higgs_mass + d_higgs_mass
 
-    class NLL(eqx.Module):
-        model: eqx.Module
-        data: jax.Array
-
-        def __call__(self):
-            return -jnp.sum(jnp.log(self.model(self.data) + 1e-10))
-
     # === Loss Function ===
     @eqx.filter_jit
-    def loss_fn(diffable, static, data):
-        params = wrap(evm.tree.combine(diffable, static))
+    def loss_fn(diffable, static, data, graphdef):
+        _, params = wrap_checked(nnx.merge(graphdef, diffable, static, copy=True))
         std = params.sigma
         composed_mu = evm.Parameter(
-            mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
+            mean_function(
+                params.higgs_mass.get_value(), params.d_higgs_mass.get_value()
+            )
         )
-        model = Gaussian(mass, mu=composed_mu, sigma=std)
-        nll = NLL(model, data)
-        return nll()
 
-    diffable, static = evm.tree.partition(unwrap(params))
+        model = Gaussian(
+            mu=composed_mu,
+            sigma=std,
+            lower=mass.lower,
+            upper=mass.upper,
+        )
+
+        # sumpdf = SumPDF(pdfs=[model], lower=mass.lower, upper=mass.upper)
+        nll = create_nll(params, model, data)
+        return jnp.squeeze(nll)
+
+    graphdef, diffable, static = nnx.split(
+        unwrap(params), evm.filter.is_dynamic_parameter, ...
+    )
 
     def optx_loss_fn(diffable, args):
         return loss_fn(diffable, *args)
@@ -109,16 +112,16 @@ if __name__ == "__main__":
         solver,
         diffable,
         has_aux=False,
-        args=(static, data),
+        args=(static, data, graphdef),
         options={},
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
+    fitted_params = wrap(nnx.merge(graphdef, fitresult.value, static, copy=True))
 
     # === Final Results ===
-    print(f"Final estimate: Std = {fitted_params.sigma.value}")
-    print(f"Final estimate: dMH = {fitted_params.d_higgs_mass.value}")
+    print(f"Final estimate: Std = {fitted_params.sigma.get_value()}")
+    print(f"Final estimate: dMH = {fitted_params.d_higgs_mass.get_value()}")
 
     # Signal normalisation
     print("Getting signal normalisation")
@@ -155,13 +158,19 @@ if __name__ == "__main__":
     params_bkg = ParamsBkg(lam)
 
     @eqx.filter_jit
-    def loss_fn_bkg(diffable, static, data):
-        params = wrap(evm.tree.combine(diffable, static))
-        model = Exponential(mass, lambd=params.lambd)
-        nll = NLL(model, data)
-        return nll()
+    def loss_fn_bkg(diffable, static, data, graphdef):
+        _, params = wrap_checked(nnx.merge(graphdef, diffable, static, copy=True))
+        model = Exponential(
+            lambd=params.lambd.get_value(),
+            lower=mass.lower,
+            upper=mass.upper,
+        )
+        nll = create_nll(params, model, data)
+        return jnp.squeeze(nll)
 
-    diffable, static = evm.tree.partition(unwrap(params_bkg))
+    graphdef, diffable, static = nnx.split(
+        unwrap(params_bkg), evm.filter.is_dynamic_parameter, ...
+    )
 
     def optx_loss_fn(diffable, args):
         return loss_fn_bkg(diffable, *args)
@@ -171,21 +180,23 @@ if __name__ == "__main__":
         solver,
         diffable,
         has_aux=False,
-        args=(static, data_sides),
+        args=(static, data_sides, graphdef),
         options={},
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
+    fitted_params = wrap(nnx.merge(graphdef, fitresult.value, static, copy=True))
 
     # === Final Results ===
-    print(f"Final estimate: Lambda = {fitted_params.lambd.value}")
+    print(f"Final estimate: Lambda = {fitted_params.lambd.get_value()}")
 
     fig, ax = plt.subplots()
-    ax.set_xlabel("$m_{\gamma\gamma}$ [GeV]")
+    ax.set_xlabel(r"$m_{\gamma\gamma}$ [GeV]")
     x = np.linspace(100, 180, 1000)
-    model_bkg = Exponential(mass, lambd=fitted_params.lambd)
-    y = model_bkg(x)
+    model_bkg = Exponential(
+        lambd=fitted_params.lambd.get_value(), lower=mass.lower, upper=mass.upper
+    )
+    y = model_bkg.prob(x)
     ax.plot(x, y, label="fit")
     ax.legend()
     save_image("part1_data_sidebands", output_dir)
@@ -235,10 +246,14 @@ if __name__ == "__main__":
 
     # redefine sigma and d_higgs_mass with the best value from before such that they are now frozen
     sigma = evm.Parameter(
-        value=params.sigma.value, name="sigma", lower=1.0, upper=5.0, frozen=True
+        value=params.sigma.get_value(), name="sigma", lower=1.0, upper=5.0, frozen=True
     )
     d_higgs_mass = evm.Parameter(
-        value=params.d_higgs_mass.value, name="dMH", lower=-1.0, upper=1.0, frozen=True
+        value=params.d_higgs_mass.get_value(),
+        name="dMH",
+        lower=-1.0,
+        upper=1.0,
+        frozen=True,
     )
     params_card = ParamsCard(
         higgs_mass,
@@ -255,33 +270,44 @@ if __name__ == "__main__":
 
     # === Loss Function ===
     @eqx.filter_jit
-    def loss_fn_card(diffable, static, data):
-        params = wrap(evm.tree.combine(diffable, static))
+    def loss_fn_card(diffable, static, data, graphdef):
+        _, params = wrap_checked(nnx.merge(graphdef, diffable, static, copy=True))
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
-                params.r.value,
-                params.xs_ggH.value,
-                params.br_hgg.value,
-                params.eff.value,
-                params.lumi.value,
+                params.r.get_value(),
+                params.xs_ggH.get_value(),
+                params.br_hgg.get_value(),
+                params.eff.get_value(),
+                params.lumi.get_value(),
             ),
             name="signal_rate",
         )
         model_bkg = Exponential(
-            var=mass, lambd=params.lambd, extended=params.model_bkg_norm
+            lambd=params.lambd.get_value(), lower=mass.lower, upper=mass.upper
         )
         composed_mu = evm.Parameter(
-            mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
+            mean_function(
+                params.higgs_mass.get_value(), params.d_higgs_mass.get_value()
+            )
         )
         model_ggH = Gaussian(
-            var=mass, mu=composed_mu, sigma=params.sigma, extended=signal_rate
+            mu=composed_mu.get_value(),
+            sigma=params.sigma,
+            lower=mass.lower,
+            upper=mass.upper,
         )
-        model = SumPDF(var=mass, pdfs=[model_ggH, model_bkg])
-        nll = ExtendedNLL(model=model)
-        # nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
-        return nll(data)
+        model = SumPDF(
+            pdfs=[model_ggH, model_bkg],
+            lower=mass.lower,
+            upper=mass.upper,
+            extended_vals=[signal_rate, params.model_bkg_norm.get_value()],
+        )
+        nll = create_extended_nll(params, model, data)
+        return jnp.squeeze(nll)
 
-    diffable, static = evm.tree.partition(unwrap(params_card))
+    graphdef, diffable, static = nnx.split(
+        unwrap(params_card), evm.filter.is_dynamic_parameter, ...
+    )
 
     def optx_loss_fn(diffable, args):
         return loss_fn_card(diffable, *args)
@@ -291,27 +317,34 @@ if __name__ == "__main__":
         solver,
         diffable,
         has_aux=False,
-        args=(static, data_sides),
+        args=(static, data_sides, graphdef),
         options={},
         max_steps=1000,
         throw=True,
     )
-    fitted_params = wrap(evm.tree.combine(fitresult.value, static))
+    fitted_params = wrap(nnx.merge(graphdef, fitresult.value, static, copy=True))
 
-    denominator = loss_fn_card(fitresult.value, static, data)
+    denominator = loss_fn_card(fitresult.value, static, data, graphdef)
 
     # === Final Results ===
-    print(f"Final estimate: r = {fitted_params.r.value}\n")
+    print(f"Final estimate: r = {fitted_params.r.get_value()}\n")
 
     # === Scan for r ===
     print("Scanning for r")
 
     # based on https://github.com/pfackeldey/evermore/blob/main/examples/nll_profiling.py
-    def fixed_mu_fit(mu, silent=True, params_card=params_card):
-        params_card = eqx.tree_at(lambda t: t.r.value, params_card, mu)
-        params_card = eqx.tree_at(lambda t: t.r.frozen, params_card, True)
+    def fixed_mu_fit(mu, params_card, silent=True):
+        # params_card = eqx.tree_at(lambda t: t.r.get_value(), params_card, mu)
+        # params_card = eqx.tree_at(lambda t: t.r.frozen, params_card, True)
 
-        diffable, static = evm.tree.partition(unwrap(params_card))
+        # Set & freeze the `mu` parameter in the model (it's mutable!):
+        params_card.r[...] = mu
+        params_card.r.set_metadata(frozen=True)
+
+        # split the model into metadata (graphdef), dynamic and static part
+        graphdef, diffable, static = nnx.split(
+            unwrap(params_card), evm.filter.is_dynamic_parameter, ...
+        )
 
         def optx_loss_fn(diffable, args):
             return loss_fn_card(diffable, *args)
@@ -321,24 +354,24 @@ if __name__ == "__main__":
             solver,
             diffable,
             has_aux=False,
-            args=(static, data_sides),
+            args=(static, data_sides, graphdef),
             options={},
             max_steps=1000,
             throw=True,
         )
-        fitted_params = wrap(evm.tree.combine(fitresult.value, static))
-        loss = loss_fn_card(fitresult.value, static, data_sides)
+        fitted_params = wrap(nnx.merge(graphdef, fitresult.value, static, copy=True))
+        loss = loss_fn_card(fitresult.value, static, data_sides, graphdef)
 
         if not silent:
             print(
-                f"mu = {mu}, loss = {loss:.4f}, lambd = {fitted_params.lambd.value.astype(float)}, bkg_norm = {fitted_params.model_bkg_norm.value.astype(float)}"
+                f"mu = {mu}, loss = {loss:.4f}, lambd = {fitted_params.lambd.get_value().astype(float)}, bkg_norm = {fitted_params.model_bkg_norm.get_value().astype(float)}"
             )
         return 2 * (loss - denominator)
 
     mus = jnp.linspace(0.95, 2.15, 20)
     two_nlls = []
     for mu in mus:
-        two_nll = fixed_mu_fit(mu, silent=True, params_card=params_card)
+        two_nll = fixed_mu_fit(mu, params_card, silent=True)
         print(f"|> {mu=:.2f} -> {two_nll=:.2f}")
         two_nlls.append(two_nll)
 
