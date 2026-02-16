@@ -10,10 +10,10 @@ from flax import nnx
 from jaxtyping import Array, Float
 from quadax import quadgk
 
-
 # ============================================================================
 # BasePDF classes
 # ============================================================================
+
 
 class BasePDF(nnx.Pytree):
     """Abstract base class for PDFs storing VALUES (JAX arrays)."""
@@ -157,8 +157,12 @@ class SumPDF(BasePDF):
         where p_i(x) is the normalized probability from PDF i.
         """
         # Unwrap data if needed
-        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
-        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+        pdfs = self.pdfs.value if hasattr(self.pdfs, "value") else self.pdfs
+        extended_vals = (
+            self.extended_vals.value
+            if hasattr(self.extended_vals, "value")
+            else self.extended_vals
+        )
 
         # Total expected count
         nu_total = sum(extended_vals)
@@ -195,8 +199,12 @@ class SumPDF(BasePDF):
             Array of sampled events
         """
         # Unwrap data if needed
-        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
-        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+        pdfs = self.pdfs.value if hasattr(self.pdfs, "value") else self.pdfs
+        extended_vals = (
+            self.extended_vals.value
+            if hasattr(self.extended_vals, "value")
+            else self.extended_vals
+        )
 
         # For each component, sample according to its expected count
         samples = []
@@ -230,8 +238,12 @@ class SumPDF(BasePDF):
             Array of sampled events (variable length due to Poisson)
         """
         # Unwrap data if needed
-        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
-        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+        pdfs = self.pdfs.value if hasattr(self.pdfs, "value") else self.pdfs
+        extended_vals = (
+            self.extended_vals.value
+            if hasattr(self.extended_vals, "value")
+            else self.extended_vals
+        )
 
         samples = []
         for pdf, extended_val in zip(pdfs, extended_vals):
@@ -251,7 +263,9 @@ class SumPDF(BasePDF):
         else:
             return jnp.array([])
 
-    def sample_extended_fixed(self, key, max_events: int) -> tuple[Float[Array, "max_events"], Float[Array, "max_events"]]:
+    def sample_extended_fixed(
+        self, key, max_events: int
+    ) -> tuple[Float[Array, "max_events"], Float[Array, "max_events"]]:
         """Sample from extended mixture with fixed output size (vmap-friendly).
 
         Samples exactly max_events from the mixture, then uses Poisson fluctuation
@@ -266,8 +280,12 @@ class SumPDF(BasePDF):
             mask: (max_events,) boolean array, True for valid events based on Poisson draw
         """
         # Unwrap data if needed
-        pdfs = self.pdfs.value if hasattr(self.pdfs, 'value') else self.pdfs
-        extended_vals = self.extended_vals.value if hasattr(self.extended_vals, 'value') else self.extended_vals
+        pdfs = self.pdfs.value if hasattr(self.pdfs, "value") else self.pdfs
+        extended_vals = (
+            self.extended_vals.value
+            if hasattr(self.extended_vals, "value")
+            else self.extended_vals
+        )
 
         # Split keys for Poisson draws and sampling
         key_poisson, key_sample = jax.random.split(key)

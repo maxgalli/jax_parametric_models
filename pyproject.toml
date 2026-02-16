@@ -8,7 +8,7 @@ version = "0.1.0"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "evermore @ git+https://github.com/pfackeldey/evermore@v0.4.0",
+    "evermore @ git+https://github.com/pfackeldey/evermore@v0.4.1",
     "numpy",
     "pandas",
     "matplotlib",

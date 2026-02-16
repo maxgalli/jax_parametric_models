@@ -1,34 +1,34 @@
-import pandas as pd
-import numpy as np
+from pathlib import Path
+from typing import NamedTuple
+
+import equinox as eqx
+import evermore as evm
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import mplhep as hep
-from scipy import interpolate
-from pathlib import Path
-import jax.numpy as jnp
-import evermore as evm
-import equinox as eqx
-from typing import NamedTuple, List
-import jax
-import optax
-from copy import deepcopy
-from dask.distributed import Client
+import optimistix
+import pandas as pd
+from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from flax import nnx
+from jax.experimental import checkify
+from plotting_helpers import save_image
 
 from paramore import (
     Exponential,
     Gaussian,
     SumPDF,
-    ExtendedNLL,
-    plot_as_data,
-    save_image,
+    create_extended_nll,
 )
-from evermore.parameters.transform import MinuitTransform, unwrap, wrap
-import optimistix
+
+wrap_checked = checkify.checkify(wrap)
 
 # double precision
 jax.config.update("jax_enable_x64", True)
 
 # plot styling
 hep.style.use("CMS")
+
 
 def main():
     # gauss for signal
@@ -44,14 +44,16 @@ def main():
     higgs_mass = evm.Parameter(
         value=125.0, name="higgs_mass", lower=120.0, upper=130.0, frozen=True
     )
-    d_higgs_mass = evm.Parameter(value=0.0, name="dMH", lower=-1.0, upper=1.0, frozen=True)
+    d_higgs_mass = evm.Parameter(
+        value=0.0, name="dMH", lower=-1.0, upper=1.0, frozen=True
+    )
     sigma = evm.Parameter(value=2.0, name="sigma", lower=1.0, upper=5.0, frozen=True)
 
     def mean_function(higgs_mass, d_higgs_mass):
         return higgs_mass + d_higgs_mass
 
     composed_mu = evm.Parameter(
-        mean_function(higgs_mass.value, d_higgs_mass.value)
+        mean_function(higgs_mass.get_value(), d_higgs_mass.get_value())
     )
 
     # norm signal
@@ -77,26 +79,27 @@ def main():
     lumi_par = evm.Parameter(
         value=lumi, name="lumi", lower=0.0, upper=1000000.0, frozen=True
     )
-    r = evm.Parameter(value=0.5, name="r", lower=0.0, upper=20.0, transform=minuit_transform)
+    r = evm.Parameter(
+        value=0.5, name="r", lower=0.0, upper=20.0, transform=minuit_transform
+    )
 
     def model_ggH_Tag0_norm_function(r, xs_ggH, br_hgg, eff, lumi):
         return r * xs_ggH * br_hgg * eff * lumi
 
     signal_rate = evm.Parameter(
         model_ggH_Tag0_norm_function(
-            r.value,
-            xs_ggH_par.value,
-            br_hgg_par.value,
-            eff_par.value,
-            lumi_par.value,
+            r.get_value(),
+            xs_ggH_par.get_value(),
+            br_hgg_par.get_value(),
+            eff_par.get_value(),
+            lumi_par.get_value(),
         ),
         name="signal_rate",
     )
-    print(signal_rate.value)
+    print(signal_rate.get_value())
 
     # signal
-    gauss = Gaussian(var=mass, mu=composed_mu, sigma=sigma, extended=signal_rate)
-
+    gauss = Gaussian(mu=composed_mu, sigma=sigma, lower=mass.lower, upper=mass.upper)
 
     # background
     lam = evm.Parameter(value=0.05, name="lambda", lower=0, upper=0.2, frozen=True)
@@ -113,22 +116,24 @@ def main():
         frozen=False,
         transform=minuit_transform,
     )
-    print(norm_bkg.value)
-    bkg = Exponential(var=mass,lambd=lam, extended=norm_bkg)
+    print(norm_bkg.get_value())
+    bkg = Exponential(lambd=lam, lower=mass.lower, upper=mass.upper)
 
     # full model
     model = SumPDF(
-        var=mass,
         pdfs=[gauss, bkg],
+        extended_vals=[signal_rate, norm_bkg],
+        lower=mass.lower,
+        upper=mass.upper,
     )
 
-    #nevents = len(df_data)
+    # nevents = len(df_data)
     # nevents = 10181
     # print("number of events:", nevents)
     ntoys = 20
     key = jax.random.PRNGKey(0)
 
-    toy = jax.vmap(model.sample)(jax.random.split(key, ntoys))
+    toy = jax.vmap(model.sample, in_axes=(0, None))(jax.random.split(key, ntoys), ntoys)
     # toy = [
     #     model.sample(
     #         key=key,
@@ -139,17 +144,17 @@ def main():
     #     ) for key in jax.random.split(key, ntoys)
     # ]
     # concatenate
-    #toy = toy[0]  # take the first toy
+    # toy = toy[0]  # take the first toy
     # plot the toy
     fig, ax = plt.subplots()
     ax.hist(
         toy[:10],
         bins=50,
         histtype="step",
-        #label="Toy data",
-        #alpha=0.5,
-        #color="blue",
-        #density=True,
+        # label="Toy data",
+        # alpha=0.5,
+        # color="blue",
+        # density=True,
     )
     ax.set_ylabel("Events")
     output_dir = base_dir / "figures_part1"
@@ -158,7 +163,7 @@ def main():
 
     # best fit on toys
     class ParamsCard(NamedTuple):
-    #class ParamsCard(eqx.Module):
+        # class ParamsCard(eqx.Module):
         higgs_mass: evm.Parameter
         d_higgs_mass: evm.Parameter
         sigma: evm.Parameter
@@ -187,29 +192,38 @@ def main():
     # === Loss Function ===
     @eqx.filter_jit
     def loss_fn_card(diffable, static, data):
-        params = wrap(evm.tree.combine(diffable, static))
+        _, params = wrap_checked(nnx.merge(graphdef, diffable, static, copy=True))
         signal_rate = evm.Parameter(
             model_ggH_Tag0_norm_function(
-                params.r.value,
-                params.xs_ggH.value,
-                params.br_hgg.value,
-                params.eff.value,
-                params.lumi.value,
+                params.r.get_value(),
+                params.xs_ggH.get_value(),
+                params.br_hgg.get_value(),
+                params.eff.get_value(),
+                params.lumi.get_value(),
             ),
             name="signal_rate",
         )
-        model_bkg = Exponential(var=mass,lambd=params.lambd, extended=params.model_bkg_norm)
+        model_bkg = Exponential(lambd=params.lambd, lower=mass.lower, upper=mass.upper)
         composed_mu = evm.Parameter(
-            mean_function(params.higgs_mass.value, params.d_higgs_mass.value)
+            mean_function(
+                params.higgs_mass.get_value(), params.d_higgs_mass.get_value()
+            )
         )
-        model_ggH = Gaussian(var=mass,mu=composed_mu, sigma=params.sigma, extended=signal_rate)
-        model= SumPDF(var=mass, pdfs=[model_bkg, model_ggH])
-        #nll = ExtendedNLL([model_bkg, model_ggH], [params.model_bkg_norm, signal_rate])
-        nll = ExtendedNLL(model)
-        return nll(data)
+        model_ggH = Gaussian(
+            mu=composed_mu, sigma=params.sigma, lower=mass.lower, upper=mass.upper
+        )
+        model = SumPDF(
+            pdfs=[model_bkg, model_ggH],
+            lower=mass.lower,
+            upper=mass.upper,
+            extended_vals=[params.model_bkg_norm, signal_rate],
+        )
+        nll = create_extended_nll(params, model, data)
+        return jnp.squeeze(nll)
 
-
-    diffable, static = evm.tree.partition(unwrap(make_params_card()))
+    graphdef, diffable, static = nnx.split(
+        unwrap(make_params_card()), evm.filter.is_dynamic_parameter, ...
+    )
 
     def optx_loss_fn(diffable, args):
         return loss_fn_card(diffable, *args)
@@ -218,8 +232,6 @@ def main():
         rtol=1e-5, atol=1e-7, verbose=frozenset({"step_size", "loss"})
     )
 
-    from IPython import embed; embed()
-    
     params_after = []
     for t in toy:
         fitresult = optimistix.minimise(
@@ -232,28 +244,31 @@ def main():
             max_steps=1000,
             throw=True,
         )
-        fitted_params = wrap(evm.tree.combine(fitresult.value, static))
+        _, fitted_params = wrap_checked(
+            nnx.merge(graphdef, fitresult.value, static, copy=True)
+        )
         params_after.append(fitted_params)
 
-    #for i, t in enumerate(toys):
+    # for i, t in enumerate(toys):
     #    np = train(t, params_card_list[i], opt_state_list[i])
     #    print(f"From toy {i}:")
     #    print(f"r = {np.r.value[0]:.4f}")
     #    params_after.append(np)
     #    #params_after.append(train(t, params_card_list[i], opt_state_list[i]))
 
-    #params_after = jax.vmap(train, in_axes=(0, 0, 0))(
+    # params_after = jax.vmap(train, in_axes=(0, 0, 0))(
     #    jnp.array(toys),
     #    jnp.array(params_card_list),
     #    jnp.array(opt_state_list)
     #    )
-    
-    dist_r = jnp.array([p.r.value for p in params_after])
+
+    dist_r = jnp.array([p.r.get_value() for p in params_after])
     mean_r = jnp.mean(dist_r)
     std_r = jnp.std(dist_r)
     print(f"mean r: {mean_r}, std r: {std_r}")
-    #for p in params_after:
+    # for p in params_after:
     #    print(p.r.value)
+
 
 if __name__ == "__main__":
     main()
